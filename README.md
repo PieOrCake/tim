@@ -12,6 +12,10 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 
 The addon is currently in development, and is not yet ready for use.
 
+## Screenshot
+
+![Tyrian Instant Messaging](images/main_window.png)
+
 ## Building
 
 ### Prerequisites

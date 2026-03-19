@@ -882,12 +882,13 @@ static void RenderMessageArea() {
         bool send = false;
         bool windowHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         bool noItemActive = !ImGui::IsAnyItemActive();
-        if (windowHovered && !TyrianIM::WhisperHook::IsSending() && !TyrianIM::WhisperHook::IsRestoring() && (g_FocusInput || noItemActive)) {
+        if (g_FocusInput && windowHovered && !TyrianIM::WhisperHook::IsSending() && !TyrianIM::WhisperHook::IsRestoring()) {
             ImGui::SetKeyboardFocusHere();
             g_FocusInput = false;
         }
 
-        if (windowHovered) {
+        bool sending = TyrianIM::WhisperHook::IsSending() || TyrianIM::WhisperHook::IsRestoring();
+        if (windowHovered && !sending) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.15f, 0.18f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
             ImGui::PushItemWidth(-60);
