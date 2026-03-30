@@ -124,6 +124,55 @@ void ChatManager::DeleteConversation(const std::string& contact) {
     }
 }
 
+void ChatManager::MergeConversation(const std::string& old_key, const std::string& new_key) {
+    std::lock_guard<std::mutex> lock(s_Mutex);
+    if (old_key == new_key) return;
+    auto old_it = s_Conversations.find(old_key);
+    if (old_it == s_Conversations.end()) return;
+
+    auto& dest = s_Conversations[new_key];
+    if (dest.contact.empty()) {
+        dest.contact = new_key;
+        dest.unread_count = 0;
+        dest.last_activity = 0;
+    }
+
+    // Preserve display_name from old conversation if dest doesn't have one
+    if (dest.display_name.empty() && !old_it->second.display_name.empty()) {
+        dest.display_name = old_it->second.display_name;
+    }
+
+    // Move messages, avoiding duplicates by epoch_ms
+    for (auto& msg : old_it->second.messages) {
+        bool dup = false;
+        for (const auto& existing : dest.messages) {
+            if (existing.epoch_ms == msg.epoch_ms && existing.text == msg.text) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            dest.messages.push_back(std::move(msg));
+        }
+    }
+
+    // Sort merged messages by time
+    std::sort(dest.messages.begin(), dest.messages.end(),
+        [](const ChatMessage& a, const ChatMessage& b) { return a.epoch_ms < b.epoch_ms; });
+
+    // Update activity and unread
+    if (old_it->second.last_activity > dest.last_activity)
+        dest.last_activity = old_it->second.last_activity;
+    dest.unread_count += old_it->second.unread_count;
+
+    // Delete old conversation and its history file
+    std::string old_path = ContactFilePath(old_key);
+    s_Conversations.erase(old_it);
+    if (!old_path.empty()) {
+        try { std::filesystem::remove(old_path); } catch (...) {}
+    }
+}
+
 void ChatManager::SetSelfAccountName(const std::string& name) {
     std::lock_guard<std::mutex> lock(s_Mutex);
     s_SelfAccountName = name;

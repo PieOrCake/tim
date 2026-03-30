@@ -3,37 +3,19 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
-#include <thread>
 
 namespace TyrianIM {
 
 AddonAPI_t* WhisperHook::s_API = nullptr;
 WhisperCallback WhisperHook::s_Callback = nullptr;
+ErrorCallback WhisperHook::s_ErrorCallback = nullptr;
+NamePairCallback WhisperHook::s_NamePairCallback = nullptr;
 HookStatus WhisperHook::s_Status = HookStatus::NotInitialized;
 bool WhisperHook::s_ProbeMode = false;
 bool WhisperHook::s_EventsSubscribed = false;
 bool WhisperHook::s_ShowDebugWindow = false;
 std::mutex WhisperHook::s_ProbeMutex;
 std::vector<std::string> WhisperHook::s_ProbeLines;
-std::atomic<bool> WhisperHook::s_IsSending{false};
-std::atomic<bool> WhisperHook::s_IsRestoring{false};
-static std::atomic<int> s_RestoreGeneration{0};  // Cancel stale deferred restores
-ChatMessageType WhisperHook::s_LastChatChannel = ChatMsg_Local;
-ErrorCallback WhisperHook::s_ErrorCallback = nullptr;
-std::string WhisperHook::s_LastWhisperTarget;
-
-const char* WhisperHook::ChannelCommand(ChatMessageType type) {
-    switch (type) {
-    case ChatMsg_Local:   return "s ";
-    case ChatMsg_Map:     return "m ";
-    case ChatMsg_Party:   return "p ";
-    case ChatMsg_Squad:   return "d ";
-    case ChatMsg_Guild:   return "g ";
-    case ChatMsg_TeamPvP: return "t ";
-    case ChatMsg_TeamWvW: return "t ";
-    default:              return "s ";
-    }
-}
 
 void WhisperHook::Initialize(AddonAPI_t* api) {
     s_API = api;
@@ -54,7 +36,6 @@ bool WhisperHook::InstallHooks() {
 
     s_Status = HookStatus::Scanning;
 
-    // Subscribe to EV_CHAT:Message from the GW2-Chat / "Events: Chat" addon
     s_API->Log(LOGL_INFO, "TyrianIM",
         "WhisperHook: Subscribing to \"" GW2_CHAT_EVENT "\"...");
 
@@ -67,250 +48,6 @@ bool WhisperHook::InstallHooks() {
         ". Requires 'Events: Chat' addon from Nexus library.");
 
     return true;
-}
-
-// Find the GW2 game window (try both DX and GR class names)
-static HWND FindGameWindow() {
-    HWND hwnd = FindWindowA("ArenaNet_Dx_Window_Class", nullptr);
-    if (!hwnd) hwnd = FindWindowA("ArenaNet_Gr_Window_Class", nullptr);
-    return hwnd;
-}
-
-bool WhisperHook::SendWhisper(const std::string& recipient, const std::string& message, bool restoreChannel) {
-    if (!s_API) {
-        ProbeLog("[SEND] FAILED: s_API is null");
-        return false;
-    }
-    if (recipient.empty() || message.empty()) {
-        ProbeLog("[SEND] FAILED: recipient or message empty (r='%s' m='%s')",
-            recipient.c_str(), message.c_str());
-        return false;
-    }
-    if (s_IsSending.load()) {
-        ProbeLog("[SEND] FAILED: already sending");
-        return false;
-    }
-
-    HWND hwnd = FindGameWindow();
-    ProbeLog("[SEND] HWND=0x%p", (void*)hwnd);
-
-    if (!hwnd) {
-        ProbeLog("[SEND] FAILED: Could not find GW2 window");
-        s_API->Log(LOGL_WARNING, "TyrianIM",
-            "SendWhisper: Could not find GW2 window");
-        return false;
-    }
-
-    char winClass[128] = {};
-    GetClassNameA(hwnd, winClass, sizeof(winClass));
-    ProbeLog("[SEND] Window class='%s'", winClass);
-    ProbeLog("[SEND] Recipient: '%s'", recipient.c_str());
-    ProbeLog("[SEND] Message: '%s'", message.c_str());
-
-    s_IsSending.store(true);
-    s_LastWhisperTarget = recipient;  // Track for error attribution
-    int myGen = ++s_RestoreGeneration;  // Cancel any pending deferred restores
-    auto api = s_API;
-    std::string rcpt = recipient;
-    std::string msg = message;
-
-    std::thread([hwnd, rcpt, msg, api, restoreChannel, myGen]() {
-        // Serenade-style SendInput: wVk + wScan with MapVirtualKeyA
-        auto sendKeyDown = [](WORD vk) {
-            INPUT input = {};
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = vk;
-            input.ki.wScan = (WORD)MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
-            input.ki.dwFlags = 0;
-            SendInput(1, &input, sizeof(INPUT));
-        };
-        auto sendKeyUp = [](WORD vk) {
-            INPUT input = {};
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = vk;
-            input.ki.wScan = (WORD)MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, &input, sizeof(INPUT));
-        };
-        auto typeChar = [&sendKeyDown, &sendKeyUp](char c) {
-            SHORT vks = VkKeyScanA(c);
-            if (vks == -1) return;
-            WORD vk = LOBYTE(vks);
-            bool needShift = (HIBYTE(vks) & 1) != 0;
-            if (needShift) sendKeyDown(VK_SHIFT);
-            sendKeyDown(vk);
-            Sleep(10);
-            sendKeyUp(vk);
-            if (needShift) sendKeyUp(VK_SHIFT);
-            Sleep(5);
-        };
-        auto typeString = [&typeChar](const std::string& s) {
-            for (char c : s) typeChar(c);
-        };
-        auto pressKey = [&sendKeyDown, &sendKeyUp](WORD vk) {
-            sendKeyDown(vk);
-            Sleep(30);
-            sendKeyUp(vk);
-        };
-        // Ctrl+V paste via SendInput
-        auto pasteFromClipboard = [&sendKeyDown, &sendKeyUp]() {
-            sendKeyDown(VK_CONTROL);
-            sendKeyDown('V');
-            Sleep(30);
-            sendKeyUp('V');
-            sendKeyUp(VK_CONTROL);
-            Sleep(30);
-        };
-        // Set clipboard text, returns true on success
-        auto setClipboard = [](const std::string& text) -> bool {
-            if (!OpenClipboard(NULL)) return false;
-            EmptyClipboard();
-            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
-            if (!hMem) { CloseClipboard(); return false; }
-            char* pMem = (char*)GlobalLock(hMem);
-            memcpy(pMem, text.c_str(), text.size() + 1);
-            GlobalUnlock(hMem);
-            SetClipboardData(CF_TEXT, hMem);
-            CloseClipboard();
-            return true;
-        };
-
-        // Save existing clipboard content so we can restore it after
-        std::string savedClipboard;
-        if (OpenClipboard(NULL)) {
-            HANDLE hData = GetClipboardData(CF_TEXT);
-            if (hData) {
-                char* pData = (char*)GlobalLock(hData);
-                if (pData) savedClipboard = pData;
-                GlobalUnlock(hData);
-            }
-            CloseClipboard();
-        }
-
-        // Step 1: Open chat in command mode (pre-types '/' for us)
-        api->GameBinds_InvokeAsync(GB_UiChatCommand, 50);
-        ProbeLog("[SEND] GameBinds: GB_UiChatCommand invoked (types '/')");
-        Sleep(150);
-
-        // Step 2: Type 'w ' after the pre-typed '/' to form '/w '
-        typeString("w ");
-        ProbeLog("[SEND] Typed 'w ' (after /)");
-        Sleep(100);
-
-        // Step 3: Paste recipient name
-        if (setClipboard(rcpt)) {
-            pasteFromClipboard();
-            ProbeLog("[SEND] Pasted recipient: '%s'", rcpt.c_str());
-        } else {
-            typeString(rcpt);
-            ProbeLog("[SEND] Typed recipient (clipboard failed): '%s'", rcpt.c_str());
-        }
-        Sleep(50);
-
-        // Step 4: Tab to message field
-        pressKey(VK_TAB);
-        ProbeLog("[SEND] Tab pressed");
-        Sleep(50);
-
-        // Step 5: Paste message
-        if (setClipboard(msg)) {
-            pasteFromClipboard();
-            ProbeLog("[SEND] Pasted message: '%s'", msg.c_str());
-        } else {
-            typeString(msg);
-            ProbeLog("[SEND] Typed message (clipboard failed): '%s'", msg.c_str());
-        }
-        Sleep(30);
-
-        // Step 6: Enter to send
-        pressKey(VK_RETURN);
-        ProbeLog("[SEND] Enter pressed - whisper sent");
-
-        // Release send lock so user can type in TIM again
-        s_IsSending.store(false);
-
-        // Restore clipboard right away
-        if (!savedClipboard.empty()) {
-            setClipboard(savedClipboard);
-        }
-
-        // Step 7: Deferred channel restore (if enabled)
-        if (!restoreChannel) {
-            ProbeLog("[SEND] Channel restore disabled, done");
-            return;
-        }
-
-        // Set restoring flag to suppress TIM auto-focus during restore
-        s_IsRestoring.store(true);
-
-        // Check every 200ms; restore once no keys are pressed for 1 second
-        // Give up after 15 seconds to avoid zombie thread
-        auto isAnyKeyPressed = []() -> bool {
-            for (int vk = 0x08; vk <= 0xFE; vk++) {
-                if (GetAsyncKeyState(vk) & 0x8000) return true;
-            }
-            return false;
-        };
-
-        ProbeLog("[SEND] Waiting for keyboard quiet before channel restore (gen=%d)...", myGen);
-        int quietMs = 0;
-        int totalMs = 0;
-        const int QUIET_THRESHOLD = 1000;  // 1 second of no keys
-        const int MAX_WAIT = 15000;        // give up after 15 seconds
-        while (quietMs < QUIET_THRESHOLD && totalMs < MAX_WAIT) {
-            Sleep(200);
-            totalMs += 200;
-            // Cancel if a newer send started
-            if (s_RestoreGeneration.load() != myGen) {
-                ProbeLog("[SEND] Channel restore cancelled (newer send detected, gen=%d vs %d)",
-                    myGen, s_RestoreGeneration.load());
-                s_IsRestoring.store(false);
-                return;
-            }
-            if (isAnyKeyPressed()) {
-                quietMs = 0;
-            } else {
-                quietMs += 200;
-            }
-        }
-
-        // Final check: cancel if a newer send started during the wait
-        if (s_RestoreGeneration.load() != myGen) {
-            ProbeLog("[SEND] Channel restore cancelled (stale gen=%d)", myGen);
-            s_IsRestoring.store(false);
-            return;
-        }
-
-        if (totalMs >= MAX_WAIT) {
-            ProbeLog("[SEND] Channel restore skipped (timeout)");
-        } else {
-            // Close any open chat first
-            pressKey(VK_RETURN);
-            Sleep(100);
-
-            // Open chat in regular mode and type the full command
-            const char* restoreCmd = ChannelCommand(s_LastChatChannel);
-            api->GameBinds_InvokeAsync(GB_UiChatCommand, 50);
-            Sleep(200);
-            typeString(restoreCmd);
-            Sleep(50);
-            pressKey(VK_RETURN);
-            ProbeLog("[SEND] Restored channel: '/%s' (type=%d)", restoreCmd, (int)s_LastChatChannel);
-        }
-        s_IsRestoring.store(false);
-        ProbeLog("[SEND] COMPLETE");
-        return;
-    }).detach();
-
-    return true;
-}
-
-bool WhisperHook::IsSending() {
-    return s_IsSending.load();
-}
-
-bool WhisperHook::IsRestoring() {
-    return s_IsRestoring.load();
 }
 
 void WhisperHook::ProbeLog(const char* fmt, ...) {
@@ -380,7 +117,6 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
         } else if (msg->Type == ChatMsg_SquadMessage) {
             ProbeLog("SquadMessage: \"%s\"", msg->SquadMessage ? msg->SquadMessage : "(null)");
         } else if (msg->Type == ChatMsg_Error) {
-            // Error structure is undocumented — try both GenericMessage and plain string
             ChatGenericMessage* gm = &msg->ErrorGeneric;
             if (IsReadableMemory(gm, sizeof(ChatGenericMessage))) {
                 ProbeLog("Error (GenericMsg) Content: \"%s\"",
@@ -388,7 +124,6 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
                 ProbeLog("Error (GenericMsg) CharName: \"%s\"",
                     (gm->CharacterName && IsReadableMemory(gm->CharacterName, 1)) ? gm->CharacterName : "(unreadable)");
             }
-            // Also try as plain string (same union offset as SquadMessage)
             if (msg->SquadMessage && IsReadableMemory(msg->SquadMessage, 1)) {
                 ProbeLog("Error (string): \"%s\"", msg->SquadMessage);
             }
@@ -396,42 +131,25 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
         ProbeLog("========== END ==========");
     }
 
-    // Handle error messages — detect whisper failures
-    if (msg->Type == ChatMsg_Error && s_ErrorCallback && !s_LastWhisperTarget.empty()) {
-        // Try to read error content — try GenericMessage.Content first, then plain string
-        std::string errorText;
-        ChatGenericMessage* gm = &msg->ErrorGeneric;
-        if (gm->Content && IsReadableMemory(gm->Content, 1)) {
-            errorText = gm->Content;
-        } else if (msg->SquadMessage && IsReadableMemory(msg->SquadMessage, 1)) {
-            errorText = msg->SquadMessage;
+    // Extract name pairs from any message type with ChatGenericMessage
+    if (s_NamePairCallback) {
+        ChatGenericMessage* gm = nullptr;
+        switch (msg->Type) {
+            case ChatMsg_Party:   gm = &msg->Party;   break;
+            case ChatMsg_Squad:   gm = &msg->Squad;   break;
+            case ChatMsg_Guild:   gm = &msg->Local;   break;
+            case ChatMsg_Local:   gm = &msg->Local;   break;
+            case ChatMsg_Map:     gm = &msg->Map;     break;
+            case ChatMsg_TeamPvP: gm = &msg->TeamPvP; break;
+            default: break;
         }
-
-        if (!errorText.empty() && errorText.find("not online") != std::string::npos) {
-            ProbeLog("[ERROR] Whisper failed: \"%s\" (target: %s)", errorText.c_str(), s_LastWhisperTarget.c_str());
-            s_ErrorCallback(s_LastWhisperTarget, errorText);
+        if (gm) {
+            std::string cn = (gm->CharacterName && IsReadableMemory(gm->CharacterName, 1)) ? gm->CharacterName : "";
+            std::string an = (gm->AccountName && IsReadableMemory(gm->AccountName, 1)) ? gm->AccountName : "";
+            if (!cn.empty() && !an.empty() && cn != an) {
+                s_NamePairCallback(cn, an);
+            }
         }
-    }
-
-    // Track the last non-whisper chat channel for restoring after whisper send
-    if (msg->Type != ChatMsg_Whisper && msg->Type != ChatMsg_Error &&
-        msg->Type != ChatMsg_Emote && msg->Type != ChatMsg_EmoteCustom &&
-        msg->Type != ChatMsg_GuildMotD && msg->Type != ChatMsg_SquadMessage &&
-        msg->Type != ChatMsg_SquadBroadcast) {
-        static const char* CH_NAMES[] = {
-            "Error", "Guild", "GuildMotD", "Local", "Map", "Party",
-            "Squad", "SquadMessage", "SquadBroadcast", "TeamPvP",
-            "TeamWvW", "Whisper", "Emote", "EmoteCustom"
-        };
-        const char* oldName = (s_LastChatChannel >= 0 && s_LastChatChannel <= ChatMsg_EmoteCustom)
-            ? CH_NAMES[s_LastChatChannel] : "?";
-        const char* newName = (msg->Type >= 0 && msg->Type <= ChatMsg_EmoteCustom)
-            ? CH_NAMES[msg->Type] : "?";
-        if (s_LastChatChannel != msg->Type) {
-            ProbeLog("[CHANNEL] Changed: %s(%d) -> %s(%d)",
-                oldName, (int)s_LastChatChannel, newName, (int)msg->Type);
-        }
-        s_LastChatChannel = msg->Type;
     }
 
     // Process whisper messages
@@ -447,11 +165,11 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
         std::string contact = !account_name.empty() ? account_name : character_name;
 
         if (is_from_me) {
-            // Outgoing: sender=charName, recipient=acctName (contact key)
-            s_Callback(character_name, account_name, content, false);
+            // Outgoing: sender=charName, recipient=contact (acctName or charName fallback)
+            s_Callback(character_name, contact, content, false);
         } else {
-            // Incoming: sender=acctName (contact key), recipient=charName
-            s_Callback(account_name, character_name, content, true);
+            // Incoming: sender=contact (acctName or charName fallback), recipient=charName
+            s_Callback(contact, character_name, content, true);
         }
 
         if (s_API) {
@@ -469,7 +187,6 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
 
 // ============================================================================
 // ProbeRawEventData — Dumps raw bytes at the event payload pointer
-// to help discover the payload struct layout.
 // ============================================================================
 void WhisperHook::ProbeRawEventData(const char* eventName, void* eventArgs) {
     if (!eventArgs) return;
@@ -479,7 +196,6 @@ void WhisperHook::ProbeRawEventData(const char* eventName, void* eventArgs) {
 
     uintptr_t base = (uintptr_t)eventArgs;
 
-    // Dump first 0x100 bytes as qwords with annotations
     ProbeLog("--- Raw qwords ---");
     for (int off = 0; off < 0x100; off += 8) {
         if (!IsReadableMemory((void*)(base + off), 8)) {
@@ -494,7 +210,6 @@ void WhisperHook::ProbeRawEventData(const char* eventName, void* eventArgs) {
         ProbeLog("  +0x%03X: 0x%016llX%s", off, (unsigned long long)val, annotation);
     }
 
-    // Scan each qword as a potential char* or wchar_t*
     ProbeLog("--- String scan ---");
     for (int off = 0; off < 0x100; off += 8) {
         if (!IsReadableMemory((void*)(base + off), 8)) break;
@@ -502,7 +217,6 @@ void WhisperHook::ProbeRawEventData(const char* eventName, void* eventArgs) {
         if (val < 0x10000 || val > 0x00007FFFFFFFFFFF) continue;
         if (!IsReadableMemory((void*)val, 4)) continue;
 
-        // Try as char*
         const char* s = (const char*)val;
         int len = 0;
         bool ok = true;
@@ -514,7 +228,6 @@ void WhisperHook::ProbeRawEventData(const char* eventName, void* eventArgs) {
             ProbeLog("  +0x%03X -> char*(%d): \"%.100s\"", off, len, s);
         }
 
-        // Try as wchar_t*
         if (IsReadableMemory((void*)val, 8)) {
             const wchar_t* ws = (const wchar_t*)val;
             int wlen = 0;
@@ -533,7 +246,6 @@ void WhisperHook::ProbeRawEventData(const char* eventName, void* eventArgs) {
         }
     }
 
-    // Also dump first 32 bytes as uint32 array (for channel types, flags, etc.)
     ProbeLog("--- As uint32 array ---");
     if (IsReadableMemory((void*)base, 32)) {
         uint32_t* u32 = (uint32_t*)base;
@@ -657,6 +369,10 @@ void WhisperHook::SetCallback(WhisperCallback callback) {
 
 void WhisperHook::SetErrorCallback(ErrorCallback callback) {
     s_ErrorCallback = callback;
+}
+
+void WhisperHook::SetNamePairCallback(NamePairCallback callback) {
+    s_NamePairCallback = callback;
 }
 
 HookStatus WhisperHook::GetStatus() {

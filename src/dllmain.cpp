@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <mmsystem.h>
 #include <imgui.h>
 #include <string>
@@ -79,16 +80,8 @@ static std::string g_SelectedContact;
 static std::string g_PendingDeleteContact;
 static std::string g_ClipboardMsg;
 static double g_ClipboardMsgExpiry = 0.0;
-static char g_InputBuf[512] = "";
 static bool g_ScrollToBottom = false;
-static bool g_FocusInput = false;
 static std::string g_DataDir;
-
-// Track the last outgoing whisper TIM sent, to deduplicate against game events
-static std::mutex g_LastTIMSendMutex;
-static std::string g_LastTIMSendRecipient;
-static std::string g_LastTIMSendText;
-static uint64_t g_LastTIMSendTime = 0; // epoch_ms when last whisper was sent
 
 // Floating icon state
 static bool g_ShowFloatingIcon = true;
@@ -97,11 +90,14 @@ static float g_FloatingIconY = 100.0f;
 static bool g_FloatingIconPosInitialized = false;
 static bool g_FloatingIconLocked = true;
 static float g_FloatingIconScale = 1.0f;
+static bool g_FloatingIconOnlyOnUnread = false;
+static float g_FloatingIconFlashDuration = 3.0f;
+static uint64_t g_FloatingIconFlashStartMs = 0;  // set by OnWhisperIntercepted
+static bool g_PendingSound = false;  // deferred to render thread
 
 // Settings
-static bool g_AutoOpenOnWhisper = true;
+static bool g_ShowQAIcon = true;
 static bool g_SoundEnabled = true;
-static bool g_RestoreChannelAfterWhisper = false;
 static std::string g_SelectedSound;  // filename only, empty = default system sound
 static std::vector<std::string> g_SoundFiles;  // cached list of .wav files in sounds/ dir
 
@@ -140,16 +136,30 @@ static void PlayNotificationSound(const std::string& filename) {
     std::string ext = filename.substr(filename.find_last_of('.'));
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     if (ext == ".mp3") {
-        // Use MCI for mp3 playback
-        std::string cmd = "close TyrianIMSound";
+        // Use MCI for mp3 playback — unique alias to avoid conflicts with other addons
+        static int s_mciCounter = 0;
+        std::string alias = "TIM_Snd_" + std::to_string(++s_mciCounter);
+        if (s_mciCounter > 1) {
+            std::string prevAlias = "TIM_Snd_" + std::to_string(s_mciCounter - 1);
+            mciSendStringA(("close " + prevAlias).c_str(), NULL, 0, NULL);
+        }
+        std::string cmd = "open \"" + fullPath + "\" type mpegvideo alias " + alias;
         mciSendStringA(cmd.c_str(), NULL, 0, NULL);
-        cmd = "open \"" + fullPath + "\" type mpegvideo alias TyrianIMSound";
-        mciSendStringA(cmd.c_str(), NULL, 0, NULL);
-        cmd = "play TyrianIMSound";
+        cmd = "play " + alias;
         mciSendStringA(cmd.c_str(), NULL, 0, NULL);
     } else {
         PlaySoundA(fullPath.c_str(), NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
     }
+}
+
+// GW2 account names match "Name.1234" (dot followed by digits)
+static bool IsAccountName(const std::string& name) {
+    auto dot = name.rfind('.');
+    if (dot == std::string::npos || dot + 1 >= name.size()) return false;
+    for (size_t i = dot + 1; i < name.size(); ++i) {
+        if (!isdigit((unsigned char)name[i])) return false;
+    }
+    return true;
 }
 
 // Settings persistence helpers
@@ -265,31 +275,14 @@ static void OnWhisperError(const std::string& contact, const std::string& error_
 // For outgoing: sender=characterName, recipient=accountName (contact key)
 static void OnWhisperIntercepted(const std::string& sender, const std::string& recipient,
                                   const std::string& message, bool is_incoming) {
-    // Determine the other person's account name (contact key) and character name
+    // Determine the other person's contact key and character name
     std::string account_name = is_incoming ? sender : recipient;
     std::string char_name = is_incoming ? recipient : sender;
 
-    // For outgoing whispers, check if TIM already added this message
-    if (!is_incoming) {
-        bool duplicate = false;
-        {
-            std::lock_guard<std::mutex> lock(g_LastTIMSendMutex);
-            if (!g_LastTIMSendRecipient.empty() && g_LastTIMSendText == message) {
-                // TIM already added this outgoing message — skip
-                duplicate = true;
-                g_LastTIMSendRecipient.clear();
-                g_LastTIMSendText.clear();
-                g_LastTIMSendTime = 0;
-            }
-        }
-        if (duplicate) {
-            // Still update display_name from outgoing event
-            auto* convo = TyrianIM::ChatManager::GetConversation(account_name);
-            if (convo && !char_name.empty()) {
-                convo->display_name = char_name;
-            }
-            return;
-        }
+    // If we now have an account name that differs from char name, merge any
+    // existing char-name-keyed conversation into the account-name-keyed one
+    if (!account_name.empty() && !char_name.empty() && account_name != char_name) {
+        TyrianIM::ChatManager::MergeConversation(char_name, account_name);
     }
 
     TyrianIM::ChatMessage msg;
@@ -310,23 +303,10 @@ static void OnWhisperIntercepted(const std::string& sender, const std::string& r
         convo->display_name = char_name;
     }
 
-    // If the window is open and this is the active conversation, suppress notifications
-    bool isActiveConvo = g_WindowVisible && (g_SelectedContact == account_name);
-
-    if (isActiveConvo) {
-        // Already viewing this conversation — just mark as read, no sound
-        TyrianIM::ChatManager::MarkAsRead(account_name);
-    } else if (is_incoming) {
-        if (g_AutoOpenOnWhisper) {
-            g_WindowVisible = true;
-            g_SelectedContact = account_name;
-            g_FocusInput = true;
-            g_ScrollToBottom = true;
-            TyrianIM::ChatManager::MarkAsRead(account_name);
-        }
-
+    if (is_incoming) {
+        g_FloatingIconFlashStartMs = NowEpochMs();
         if (g_SoundEnabled) {
-            PlayNotificationSound(g_SelectedSound);
+            g_PendingSound = true;  // defer to render thread (Wine threading)
         }
     }
 
@@ -351,13 +331,14 @@ static void SaveSettings() {
     f << "show_floating_icon=" << (g_ShowFloatingIcon ? 1 : 0) << "\n";
     f << "floating_icon_x=" << g_FloatingIconX << "\n";
     f << "floating_icon_y=" << g_FloatingIconY << "\n";
-    f << "auto_open_on_whisper=" << (g_AutoOpenOnWhisper ? 1 : 0) << "\n";
     f << "sound_enabled=" << (g_SoundEnabled ? 1 : 0) << "\n";
     f << "selected_sound=" << g_SelectedSound << "\n";
     f << "floating_icon_locked=" << (g_FloatingIconLocked ? 1 : 0) << "\n";
-    f << "restore_channel=" << (g_RestoreChannelAfterWhisper ? 1 : 0) << "\n";
+    f << "floating_icon_only_on_unread=" << (g_FloatingIconOnlyOnUnread ? 1 : 0) << "\n";
+    f << "floating_icon_flash_duration=" << g_FloatingIconFlashDuration << "\n";
     f << "font_scale=" << g_FontScale << "\n";
     f << "icon_scale=" << g_FloatingIconScale << "\n";
+    f << "show_qa_icon=" << (g_ShowQAIcon ? 1 : 0) << "\n";
 }
 
 static void LoadSettings() {
@@ -373,10 +354,11 @@ static void LoadSettings() {
         if (key == "show_floating_icon") g_ShowFloatingIcon = (val == "1");
         else if (key == "floating_icon_x") try { g_FloatingIconX = std::stof(val); } catch (...) {}
         else if (key == "floating_icon_y") try { g_FloatingIconY = std::stof(val); } catch (...) {}
-        else if (key == "auto_open_on_whisper") g_AutoOpenOnWhisper = (val == "1");
         else if (key == "sound_enabled") g_SoundEnabled = (val == "1");
         else if (key == "floating_icon_locked") g_FloatingIconLocked = (val == "1");
-        else if (key == "restore_channel") g_RestoreChannelAfterWhisper = (val == "1");
+        else if (key == "show_qa_icon") g_ShowQAIcon = (val == "1");
+        else if (key == "floating_icon_only_on_unread") g_FloatingIconOnlyOnUnread = (val == "1");
+        else if (key == "floating_icon_flash_duration") try { g_FloatingIconFlashDuration = std::stof(val); if (g_FloatingIconFlashDuration < 1.0f) g_FloatingIconFlashDuration = 1.0f; if (g_FloatingIconFlashDuration > 10.0f) g_FloatingIconFlashDuration = 10.0f; } catch (...) {}
         else if (key == "font_scale") try { g_FontScale = std::stof(val); if (g_FontScale < 0.8f) g_FontScale = 0.8f; if (g_FontScale > 2.0f) g_FontScale = 2.0f; } catch (...) {}
         else if (key == "icon_scale") try { g_FloatingIconScale = std::stof(val); if (g_FloatingIconScale < 0.5f) g_FloatingIconScale = 0.5f; if (g_FloatingIconScale > 3.0f) g_FloatingIconScale = 3.0f; } catch (...) {}
         else if (key == "selected_sound" || key == "custom_sound_path") {
@@ -391,11 +373,13 @@ static void LoadSettings() {
 static void RenderFloatingIcon() {
     if (!g_ShowFloatingIcon) return;
 
-    int unread = TyrianIM::ChatManager::GetTotalUnreadCount();
     uint64_t now_ms = NowEpochMs();
 
-    // Flash continuously while there are unread whispers
-    bool is_flashing = (unread > 0);
+    // Flash when an incoming whisper arrives (triggered by OnWhisperIntercepted)
+    bool is_flashing = (g_FloatingIconFlashStartMs > 0 && (now_ms - g_FloatingIconFlashStartMs) < (uint64_t)(g_FloatingIconFlashDuration * 1000.0f));
+
+    // "Only show on message" — hide when not flashing
+    if (g_FloatingIconOnlyOnUnread && !is_flashing) return;
     float flash_alpha = 0.0f;
     if (is_flashing) {
         float t = (float)(now_ms % 1000) / 1000.0f;
@@ -432,8 +416,11 @@ static void RenderFloatingIcon() {
     ImU32 bubbleCol, borderCol;
     borderCol = ImGui::ColorConvertFloat4ToU32(ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
     if (is_flashing) {
-        float v = 0.85f + 0.15f * flash_alpha;
-        bubbleCol = ImGui::ColorConvertFloat4ToU32(ImVec4(v, v, v, 0.95f));
+        // Pulse between white and bright blue for visibility
+        float r = 1.0f - 0.7f * flash_alpha;
+        float g = 1.0f - 0.5f * flash_alpha;
+        float b = 1.0f;
+        bubbleCol = ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, 0.95f));
     } else {
         bubbleCol = ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.95f));
     }
@@ -459,20 +446,13 @@ static void RenderFloatingIcon() {
     dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), bubbleCol, 14.0f * s);
     dl->AddTriangleFilled(t1, t2, t3, bubbleCol);
 
-    // Draw text inside bubble
-    std::string label;
-    ImVec4 textCol;
-    if (unread > 0) {
-        label = std::to_string(unread);
-        textCol = ImVec4(0.1f, 0.15f, 0.4f, 1.0f);
-    } else {
-        label = "TIM";
-        textCol = ImVec4(0.1f, 0.15f, 0.4f, 1.0f);
-    }
+    // Draw text inside bubble — always show "TIM"
+    std::string label = "TIM";
+    ImVec4 textCol = ImVec4(0.1f, 0.15f, 0.4f, 1.0f);
 
-    // Center text in the bubble (larger font for unread count)
+    // Center text in the bubble
     ImFont* font = ImGui::GetFont();
-    float fontSize = ((unread > 0) ? font->FontSize * 1.5f : font->FontSize) * s;
+    float fontSize = font->FontSize * s;
     ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, label.c_str());
     float cx = bx0 + (bx1 - bx0 - textSize.x) * 0.5f;
     float cy = by0 + (by1 - by0 - textSize.y) * 0.5f;
@@ -482,18 +462,7 @@ static void RenderFloatingIcon() {
     if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
         g_WindowVisible = !g_WindowVisible;
         if (g_WindowVisible) {
-            if (unread > 0) {
-                auto convos = TyrianIM::ChatManager::GetConversations();
-                for (auto* c : convos) {
-                    if (c->unread_count > 0) {
-                        g_SelectedContact = c->contact;
-                        TyrianIM::ChatManager::MarkAsRead(c->contact);
-                        g_ScrollToBottom = true;
-                        break;
-                    }
-                }
-            }
-            g_FocusInput = true;
+            g_ScrollToBottom = true;
         }
     }
 
@@ -544,7 +513,6 @@ static void RenderContactList(float width) {
 
     for (const auto* convo : conversations) {
         bool is_selected = (g_SelectedContact == convo->contact);
-        bool has_unread = (convo->unread_count > 0);
 
         ImVec2 cursor = ImGui::GetCursorScreenPos();
         float itemHeight = 30.0f + 18.0f * g_FontScale;
@@ -558,8 +526,6 @@ static void RenderContactList(float width) {
 
         if (ImGui::Selectable(("##contact_" + convo->contact).c_str(), false, 0, ImVec2(0, itemHeight))) {
             g_SelectedContact = convo->contact;
-            TyrianIM::ChatManager::MarkAsRead(convo->contact);
-            g_FocusInput = true;
             g_ScrollToBottom = true;
         }
 
@@ -569,6 +535,25 @@ static void RenderContactList(float width) {
             ImGui::OpenPopup(popupId.c_str());
         }
         if (ImGui::BeginPopup(popupId.c_str())) {
+            bool srcIsAccount = IsAccountName(convo->contact);
+            if (ImGui::BeginMenu("Merge into...")) {
+                for (const auto* target : conversations) {
+                    if (target->contact == convo->contact) continue;
+                    if (srcIsAccount && IsAccountName(target->contact)) continue;
+                    std::string targetLabel = !target->display_name.empty() ? target->display_name : target->contact;
+                    if (!target->display_name.empty() && target->display_name != target->contact)
+                        targetLabel += " (" + target->contact + ")";
+                    if (ImGui::MenuItem(targetLabel.c_str())) {
+                        if (g_SelectedContact == convo->contact)
+                            g_SelectedContact = target->contact;
+                        TyrianIM::ChatManager::MergeConversation(convo->contact, target->contact);
+                        TyrianIM::ChatManager::SaveHistory();
+                        g_ScrollToBottom = true;
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Delete conversation")) {
                 g_PendingDeleteContact = convo->contact;
                 ImGui::OpenPopup("Confirm Delete##ConfirmDel");
@@ -596,26 +581,9 @@ static void RenderContactList(float width) {
             ImVec2(avatarCenter.x - initSize.x * 0.5f, avatarCenter.y - initSize.y * 0.5f),
             IM_COL32(255, 255, 255, 230), initial);
 
-        // Unread dot on avatar
-        if (has_unread) {
-            dl->AddCircleFilled(
-                ImVec2(avatarCenter.x + avatarRadius - 3, avatarCenter.y - avatarRadius + 3),
-                7.0f, COLOR_UNREAD_DOT);
-            if (convo->unread_count < 10) {
-                std::string cnt = std::to_string(convo->unread_count);
-                float dotFs = font->FontSize * 0.9f;
-                ImVec2 cntSize = font->CalcTextSizeA(dotFs, FLT_MAX, 0.0f, cnt.c_str());
-                dl->AddText(font, dotFs,
-                    ImVec2(avatarCenter.x + avatarRadius - 3 - cntSize.x * 0.5f,
-                           avatarCenter.y - avatarRadius + 3 - cntSize.y * 0.5f),
-                    IM_COL32(255, 255, 255, 255), cnt.c_str());
-            }
-        }
-
         // Text content (scaled)
         float textX = cursor.x + 8 + avatarRadius * 2 + 10;
-        ImVec4 nameColor = has_unread ? ImVec4(1.0f, 1.0f, 1.0f, 1.0f)
-                                      : ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
+        ImVec4 nameColor = ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
         std::string primaryName = !convo->display_name.empty() ? convo->display_name : convo->contact;
         dl->AddText(font, fs, ImVec2(textX, cursor.y + 6),
             ImGui::ColorConvertFloat4ToU32(nameColor), primaryName.c_str());
@@ -870,104 +838,7 @@ static void RenderMessageArea() {
 
         ImGui::EndChild();
 
-        // --- Input area with background ---
-        {
-            ImDrawList* idl = ImGui::GetWindowDrawList();
-            ImVec2 iPos = ImGui::GetCursorScreenPos();
-            float iH = ImGui::GetFrameHeightWithSpacing() + 4;
-            idl->AddRectFilled(iPos, ImVec2(iPos.x + ImGui::GetContentRegionAvail().x, iPos.y + iH),
-                COLOR_INPUT_BG, 4.0f);
-        }
-
-        bool send = false;
-        bool windowHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
-        bool noItemActive = !ImGui::IsAnyItemActive();
-        if (g_FocusInput && windowHovered && !TyrianIM::WhisperHook::IsSending() && !TyrianIM::WhisperHook::IsRestoring()) {
-            ImGui::SetKeyboardFocusHere();
-            g_FocusInput = false;
-        }
-
-        bool sending = TyrianIM::WhisperHook::IsSending() || TyrianIM::WhisperHook::IsRestoring();
-        if (windowHovered && !sending) {
-            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.15f, 0.18f, 1.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
-            ImGui::PushItemWidth(-60);
-            if (ImGui::InputText("##MsgInput", g_InputBuf, sizeof(g_InputBuf),
-                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
-                send = true;
-            }
-            ImGui::PopItemWidth();
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 0.9f, 1.0f));
-            if (ImGui::Button("Send", ImVec2(52, 0))) {
-                send = true;
-            }
-            ImGui::PopStyleColor(2);
-            ImGui::PopStyleVar();
-        } else {
-            // No input widget when not hovered
-            float w = ImGui::GetContentRegionAvail().x - 60;
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.18f, 1.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
-            ImGui::BeginChild("##MsgPlaceholder", ImVec2(w, ImGui::GetFrameHeight()), false);
-            ImGui::TextColored(COLOR_TIMESTAMP, "%s", g_InputBuf[0] ? g_InputBuf : "");
-            ImGui::EndChild();
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor();
-            ImGui::SameLine();
-            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
-            ImGui::Button("Send", ImVec2(52, 0));
-            ImGui::PopStyleVar(2);
-        }
-
-        if (send && g_InputBuf[0] != '\0' && !TyrianIM::WhisperHook::IsSending()) {
-            TyrianIM::ChatMessage msg;
-            msg.sender = TyrianIM::ChatManager::GetSelfAccountName();
-            msg.recipient = g_SelectedContact;
-            msg.text = g_InputBuf;
-            msg.epoch_ms = NowEpochMs();
-            msg.timestamp = FormatTime(msg.epoch_ms);
-            msg.direction = TyrianIM::MessageDirection::Outgoing;
-            msg.source = TyrianIM::MessageSource::Whisper;
-
-            TyrianIM::ChatManager::AddMessage(msg);
-            g_ScrollToBottom = true;
-
-            // Track this send so the outgoing game event is deduplicated
-            {
-                std::lock_guard<std::mutex> lock(g_LastTIMSendMutex);
-                g_LastTIMSendRecipient = g_SelectedContact;
-                g_LastTIMSendText = g_InputBuf;
-                g_LastTIMSendTime = NowEpochMs();
-            }
-
-            g_InputBuf[0] = '\0';
-
-            // Send the whisper in-game via /w CharacterName
-            // g_SelectedContact is the account name; use display_name (character name) for /w
-            std::string whisper_target = (convo && !convo->display_name.empty())
-                ? convo->display_name : g_SelectedContact;
-            if (APIDefs) {
-                APIDefs->Log(LOGL_DEBUG, "TyrianIM",
-                    ("SendWhisper: contact='" + g_SelectedContact +
-                     "' display_name='" + (convo ? convo->display_name : "(no convo)") +
-                     "' target='" + whisper_target +
-                     "' text='" + msg.text + "'").c_str());
-            }
-            bool sent = TyrianIM::WhisperHook::SendWhisper(whisper_target, msg.text, g_RestoreChannelAfterWhisper);
-            if (APIDefs) {
-                APIDefs->Log(LOGL_DEBUG, "TyrianIM",
-                    sent ? "SendWhisper returned TRUE" : "SendWhisper returned FALSE");
-            }
-
-            // Defer input focus until send completes (so PostMessage keys aren't captured)
-            g_FocusInput = true;
-        }
+        ImGui::SetWindowFontScale(1.0f);
     }
 
     ImGui::EndChild();
@@ -988,22 +859,10 @@ void AddonRender() {
         return;
     }
 
-    // Check for whisper send timeout — if echo not received within 5s, mark as failed
-    {
-        std::lock_guard<std::mutex> lock(g_LastTIMSendMutex);
-        if (!g_LastTIMSendRecipient.empty() && g_LastTIMSendTime > 0) {
-            uint64_t elapsed = NowEpochMs() - g_LastTIMSendTime;
-            if (elapsed > 5000) {
-                std::string failContact = g_LastTIMSendRecipient;
-                g_LastTIMSendRecipient.clear();
-                g_LastTIMSendText.clear();
-                g_LastTIMSendTime = 0;
-
-                TyrianIM::ChatManager::MarkLastOutgoingFailed(failContact);
-                TyrianIM::ChatManager::SaveHistory();
-                g_ScrollToBottom = true;
-            }
-        }
+    // Play deferred notification sound on render thread (Wine compatibility)
+    if (g_PendingSound) {
+        g_PendingSound = false;
+        PlayNotificationSound(g_SelectedSound);
     }
 
     // Always render floating icon (independent of main window)
@@ -1018,35 +877,6 @@ void AddonRender() {
     }
 
     ImGui::SetWindowFontScale(g_FontScale);
-
-    // Status bar at top
-    auto hook_status = TyrianIM::WhisperHook::GetStatus();
-    int unread = TyrianIM::ChatManager::GetTotalUnreadCount();
-
-    if (unread > 0) {
-        ImGui::TextColored(COLOR_UNREAD, "%d unread", unread);
-        ImGui::SameLine();
-    }
-
-    ImGui::TextColored(COLOR_TIMESTAMP, "Hook:");
-    ImGui::SameLine();
-    ImVec4 sc = (hook_status == TyrianIM::HookStatus::Hooked) ? COLOR_STATUS_OK
-              : (hook_status == TyrianIM::HookStatus::Failed) ? COLOR_STATUS_ERR
-              : COLOR_STATUS_WARN;
-    ImGui::TextColored(sc, "%s", TyrianIM::WhisperHook::GetStatusString());
-    if (hook_status != TyrianIM::HookStatus::Hooked) {
-        ImGui::SameLine();
-        ImGui::TextColored(COLOR_TIMESTAMP, "| Install 'Events: Chat' addon");
-    } else if (TyrianIM::WhisperHook::GetProbeMode()) {
-        ImGui::SameLine();
-        ImGui::TextColored(COLOR_STATUS_WARN, "| PROBE MODE");
-    }
-    if (hook_status == TyrianIM::HookStatus::Hooked) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Debug")) {
-            TyrianIM::WhisperHook::s_ShowDebugWindow = !TyrianIM::WhisperHook::s_ShowDebugWindow;
-        }
-    }
 
     ImGui::Separator();
 
@@ -1072,83 +902,100 @@ void AddonRender() {
 
     ImGui::End();
 
-    // Render debug window (separate floating window)
-    TyrianIM::WhisperHook::RenderDebugWindow();
 }
 
 // Options panel (shown in Nexus addon settings)
 void AddonOptions() {
     ImGui::Text("Tyrian Instant Messaging");
-    ImGui::Separator();
+    if (ImGui::SmallButton("Homepage")) {
+        ShellExecuteA(NULL, "open", "https://pie.rocks.cc/", NULL, NULL, SW_SHOWNORMAL);
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Buy me a coffee!")) {
+        ShellExecuteA(NULL, "open", "https://ko-fi.com/pieorcake", NULL, NULL, SW_SHOWNORMAL);
+    }
+    ImGui::Spacing();
 
     // --- Status ---
-    ImGui::Text("Chat Events Status: ");
-    ImGui::SameLine();
     auto status = TyrianIM::WhisperHook::GetStatus();
     ImVec4 sc = (status == TyrianIM::HookStatus::Hooked) ? COLOR_STATUS_OK
               : (status == TyrianIM::HookStatus::Failed) ? COLOR_STATUS_ERR
               : COLOR_STATUS_WARN;
+    ImGui::Text("Status:");
+    ImGui::SameLine();
     ImGui::TextColored(sc, "%s", TyrianIM::WhisperHook::GetStatusString());
-
-    // --- Notifications ---
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Text("Notifications");
-    ImGui::Spacing();
+    ImGui::TextColored(COLOR_TIMESTAMP, "Requires 'Events: Chat' addon from the Nexus library.");
 
     bool settings_changed = false;
 
-    if (ImGui::Checkbox("Show floating notification icon", &g_ShowFloatingIcon)) {
+    // --- Appearance ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Appearance");
+    ImGui::Spacing();
+
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::SliderFloat("Font scale", &g_FontScale, 0.8f, 2.0f, "%.1f")) {
+        settings_changed = true;
+    }
+
+    if (ImGui::Checkbox("Show quick access icon", &g_ShowQAIcon)) {
+        if (g_ShowQAIcon) {
+            APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_TYRIANIM_TOGGLE", "Tyrian IM");
+        } else {
+            APIDefs->QuickAccess_Remove(QA_ID);
+        }
+        settings_changed = true;
+    }
+
+    // --- Notification Icon ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Notification Icon");
+    ImGui::Spacing();
+
+    if (ImGui::Checkbox("Show floating icon", &g_ShowFloatingIcon)) {
         settings_changed = true;
     }
     if (g_ShowFloatingIcon) {
-        ImGui::SameLine();
+        ImGui::Indent();
         if (ImGui::Checkbox("Lock position", &g_FloatingIconLocked)) {
             settings_changed = true;
         }
-    }
-    ImGui::TextColored(COLOR_TIMESTAMP, "  %s", g_FloatingIconLocked ? "Position locked. Uncheck 'Lock position' to drag." : "Drag the icon to reposition it.");
-    if (g_ShowFloatingIcon) {
-        ImGui::SetNextItemWidth(150);
-        if (ImGui::SliderFloat("Icon size", &g_FloatingIconScale, 0.5f, 3.0f, "%.1fx")) {
+        if (ImGui::Checkbox("Only show on message", &g_FloatingIconOnlyOnUnread)) {
             settings_changed = true;
         }
+        ImGui::SetNextItemWidth(150);
+        if (ImGui::SliderFloat("Flash duration", &g_FloatingIconFlashDuration, 1.0f, 10.0f, "%.0fs")) {
+            settings_changed = true;
+        }
+        ImGui::SetNextItemWidth(150);
+        if (ImGui::SliderFloat("Size", &g_FloatingIconScale, 0.5f, 3.0f, "%.1fx")) {
+            settings_changed = true;
+        }
+        ImGui::Unindent();
     }
 
-    if (ImGui::Checkbox("Auto-open window on incoming whisper", &g_AutoOpenOnWhisper)) {
-        settings_changed = true;
-    }
-
-    if (ImGui::Checkbox("Restore chat channel after sending whisper", &g_RestoreChannelAfterWhisper)) {
-        settings_changed = true;
-    }
-    ImGui::TextColored(COLOR_TIMESTAMP, "  Waits for keyboard idle then switches back to previous channel");
-
+    // --- Sound ---
     ImGui::Spacing();
-    if (ImGui::SliderFloat("Font Scale", &g_FontScale, 0.8f, 2.0f, "%.1f")) {
-        settings_changed = true;
-    }
-    ImGui::TextColored(COLOR_TIMESTAMP, "  Adjusts text size in the TIM window (default: 1.0)");
-
+    ImGui::Separator();
+    ImGui::Text("Sound");
     ImGui::Spacing();
+
     if (ImGui::Checkbox("Play sound on incoming whisper", &g_SoundEnabled)) {
         settings_changed = true;
     }
-
     if (g_SoundEnabled) {
         ImGui::Indent();
-        ImGui::Text("Notification sound:");
+        ImGui::Text("Sound file:");
         ImGui::SameLine();
-        ImGui::PushItemWidth(220);
-        // Build preview label
-        const char* preview = g_SelectedSound.empty() ? "(Default system sound)" : g_SelectedSound.c_str();
+        ImGui::PushItemWidth(200);
+        const char* preview = g_SelectedSound.empty() ? "(Default)" : g_SelectedSound.c_str();
         if (ImGui::BeginCombo("##SoundSelect", preview)) {
-            // Default option
-            if (ImGui::Selectable("(Default system sound)", g_SelectedSound.empty())) {
+            if (ImGui::Selectable("(Default)", g_SelectedSound.empty())) {
                 g_SelectedSound.clear();
                 settings_changed = true;
             }
-            // List .wav files from sounds/ directory
             for (const auto& file : g_SoundFiles) {
                 bool selected = (g_SelectedSound == file);
                 if (ImGui::Selectable(file.c_str(), selected)) {
@@ -1171,33 +1018,33 @@ void AddonOptions() {
         ImGui::Unindent();
     }
 
-    // --- Debug ---
+    // --- Data ---
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::Text("Debug");
+    ImGui::Text("Data");
     ImGui::Spacing();
 
-    if (status == TyrianIM::HookStatus::Hooked) {
-        bool probe = TyrianIM::WhisperHook::GetProbeMode();
-        if (ImGui::Checkbox("Probe Mode (dumps raw event data to debug window)", &probe)) {
-            TyrianIM::WhisperHook::SetProbeMode(probe);
-        }
-        if (probe) {
-            ImGui::TextColored(COLOR_STATUS_WARN,
-                "Probe active: chat messages will dump raw data to the debug window.");
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::TextWrapped(
-        "Requires 'Events: Chat' addon from the Nexus library for whisper interception.");
-
-    ImGui::Spacing();
     if (ImGui::Button("Clear Chat History")) {
         TyrianIM::ChatManager::Shutdown();
         std::string dir = APIDefs ? std::string(APIDefs->Paths_GetAddonDirectory("TyrianIM")) : "";
         TyrianIM::ChatManager::Initialize(dir);
         g_SelectedContact.clear();
+    }
+
+    // --- Debug ---
+    if (status == TyrianIM::HookStatus::Hooked) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Debug");
+        ImGui::Spacing();
+
+        bool probe = TyrianIM::WhisperHook::GetProbeMode();
+        if (ImGui::Checkbox("Probe Mode", &probe)) {
+            TyrianIM::WhisperHook::SetProbeMode(probe);
+        }
+        if (probe) {
+            ImGui::TextColored(COLOR_STATUS_WARN, "Dumping raw event data to debug window.");
+        }
     }
 
     if (settings_changed) {
@@ -1227,6 +1074,9 @@ void AddonLoad(AddonAPI_t* aApi) {
     TyrianIM::WhisperHook::Initialize(APIDefs);
     TyrianIM::WhisperHook::SetCallback(OnWhisperIntercepted);
     TyrianIM::WhisperHook::SetErrorCallback(OnWhisperError);
+    TyrianIM::WhisperHook::SetNamePairCallback([](const std::string& char_name, const std::string& account_name) {
+        TyrianIM::ChatManager::MergeConversation(char_name, account_name);
+    });
 
     // Attempt to install whisper hooks (will log warning that patterns aren't defined yet)
     TyrianIM::WhisperHook::InstallHooks();
@@ -1249,7 +1099,9 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Textures_LoadFromMemory(TEX_ICON_HOVER, (void*)ICON_DATA, ICON_DATA_SIZE, nullptr);
 
     // Register quick access shortcut
-    APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_TYRIANIM_TOGGLE", "Tyrian IM");
+    if (g_ShowQAIcon) {
+        APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_TYRIANIM_TOGGLE", "Tyrian IM");
+    }
 
     APIDefs->Log(LOGL_INFO, "TyrianIM", "Tyrian Instant Messaging loaded");
 }
@@ -1281,9 +1133,6 @@ void ProcessKeybind(const char* aIdentifier, bool aIsRelease) {
 
     if (strcmp(aIdentifier, "KB_TYRIANIM_TOGGLE") == 0) {
         g_WindowVisible = !g_WindowVisible;
-        if (g_WindowVisible && !g_SelectedContact.empty()) {
-            g_FocusInput = true;
-        }
     }
 }
 

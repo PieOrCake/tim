@@ -67,6 +67,10 @@ public:
     // Delete a conversation and its history file
     static void DeleteConversation(const std::string& contact);
 
+    // Merge a conversation keyed by old_key into one keyed by new_key
+    // (e.g. character name → account name when account becomes available)
+    static void MergeConversation(const std::string& old_key, const std::string& new_key);
+
     // Set the local player's account name
     static void SetSelfAccountName(const std::string& name);
     static const std::string& GetSelfAccountName();
