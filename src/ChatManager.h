@@ -85,6 +85,10 @@ private:
     static std::string s_DataDir;
     static std::mutex s_Mutex;
 
+    // Cached sorted conversation list — rebuilt only when dirty
+    static std::vector<const Conversation*> s_SortedCache;
+    static bool s_SortDirty;
+
     // Resolve the contact name from a message (the "other party")
     static std::string ResolveContact(const ChatMessage& msg);
 

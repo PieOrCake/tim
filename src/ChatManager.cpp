@@ -10,12 +10,16 @@ std::unordered_map<std::string, Conversation> ChatManager::s_Conversations;
 std::string ChatManager::s_SelfAccountName;
 std::string ChatManager::s_DataDir;
 std::mutex ChatManager::s_Mutex;
+std::vector<const Conversation*> ChatManager::s_SortedCache;
+bool ChatManager::s_SortDirty = true;
 
 void ChatManager::Initialize(const std::string& data_dir) {
     std::lock_guard<std::mutex> lock(s_Mutex);
     s_DataDir = data_dir;
     s_Conversations.clear();
     s_SelfAccountName.clear();
+    s_SortedCache.clear();
+    s_SortDirty = true;
 }
 
 void ChatManager::Shutdown() {
@@ -49,6 +53,7 @@ void ChatManager::AddMessage(const ChatMessage& msg) {
 
     convo.messages.push_back(msg);
     convo.last_activity = msg.epoch_ms;
+    s_SortDirty = true;
 
     if (msg.direction == MessageDirection::Incoming) {
         convo.unread_count++;
@@ -60,19 +65,19 @@ void ChatManager::AddMessage(const ChatMessage& msg) {
 
 std::vector<const Conversation*> ChatManager::GetConversations() {
     std::lock_guard<std::mutex> lock(s_Mutex);
-    std::vector<const Conversation*> result;
-    result.reserve(s_Conversations.size());
-
-    for (const auto& [key, convo] : s_Conversations) {
-        result.push_back(&convo);
+    if (s_SortDirty) {
+        s_SortedCache.clear();
+        s_SortedCache.reserve(s_Conversations.size());
+        for (const auto& [key, convo] : s_Conversations) {
+            s_SortedCache.push_back(&convo);
+        }
+        std::sort(s_SortedCache.begin(), s_SortedCache.end(),
+            [](const Conversation* a, const Conversation* b) {
+                return a->last_activity > b->last_activity;
+            });
+        s_SortDirty = false;
     }
-
-    std::sort(result.begin(), result.end(),
-        [](const Conversation* a, const Conversation* b) {
-            return a->last_activity > b->last_activity;
-        });
-
-    return result;
+    return s_SortedCache;
 }
 
 Conversation* ChatManager::GetConversation(const std::string& contact) {
@@ -117,6 +122,7 @@ void ChatManager::MarkLastOutgoingFailed(const std::string& contact) {
 void ChatManager::DeleteConversation(const std::string& contact) {
     std::lock_guard<std::mutex> lock(s_Mutex);
     s_Conversations.erase(contact);
+    s_SortDirty = true;
     // Delete the history file
     std::string path = ContactFilePath(contact);
     if (!path.empty()) {
@@ -168,6 +174,7 @@ void ChatManager::MergeConversation(const std::string& old_key, const std::strin
     // Delete old conversation and its history file
     std::string old_path = ContactFilePath(old_key);
     s_Conversations.erase(old_it);
+    s_SortDirty = true;
     if (!old_path.empty()) {
         try { std::filesystem::remove(old_path); } catch (...) {}
     }

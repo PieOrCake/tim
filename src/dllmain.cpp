@@ -11,7 +11,11 @@
 #include <fstream>
 #include <filesystem>
 #include <cmath>
+#include <thread>
+#include <mutex>
+#include <cwchar>
 #include "../include/nexus/Nexus.h"
+#include "../include/mumble/Mumble.h"
 #include "ChatManager.h"
 #include "WhisperHook.h"
 
@@ -95,6 +99,91 @@ static float g_FloatingIconFlashDuration = 3.0f;
 static uint64_t g_FloatingIconFlashStartMs = 0;  // set by OnWhisperIntercepted
 static bool g_PendingSound = false;  // deferred to render thread
 
+// Cached data link pointers (set once in AddonLoad)
+static HWND g_GameHWND = nullptr;
+static Mumble::Data* g_MumbleLink = nullptr;
+static NexusLinkData_t* g_NexusLink = nullptr;
+static char g_InputBuf[200] = {};
+static bool g_FocusInput = false;
+static int g_SendDelay = 50;  // ms between keystrokes
+static std::mutex g_SendMutex;
+static bool g_IsSending = false;
+
+// --- Bubble layout cache (amortized recomputation) ---
+struct BubbleLayout {
+    float bubbleW, bubbleH;
+    ImVec2 nameSize, timeSize, msgSize;
+    float textWrapWidth;
+    std::string senderLabel;
+    bool isSystem;
+    // For system messages
+    float sysW, sysH;
+};
+
+struct LayoutCache {
+    std::string contact;
+    float areaWidth = 0;
+    float fontScale = 0;
+    size_t messageCount = 0;
+    std::vector<BubbleLayout> layouts;
+};
+static LayoutCache g_BubbleCache;
+static std::vector<size_t> g_LayoutQueue;  // indices pending recomputation
+static const int LAYOUT_BATCH_SIZE = 10;   // max recomputations per frame
+
+static void InvalidateBubbleCache() {
+    g_BubbleCache.layouts.clear();
+    g_BubbleCache.messageCount = 0;
+    g_LayoutQueue.clear();
+}
+
+// Compute layout for a single message at index i in the conversation
+static void ComputeBubbleLayout(const TyrianIM::Conversation* convo, size_t i,
+                                 float areaWidth, float fontScale, ImFont* font) {
+    if (i >= convo->messages.size() || i >= g_BubbleCache.layouts.size()) return;
+
+    const auto& msg = convo->messages[i];
+    auto& layout = g_BubbleCache.layouts[i];
+    float fs = font->FontSize * fontScale;
+    float maxBubbleWidth = areaWidth * 0.75f;
+    float padding = 10.0f;
+
+    if (msg.direction == TyrianIM::MessageDirection::System) {
+        layout.isSystem = true;
+        float sysFs = font->FontSize * (fontScale * 0.85f);
+        layout.msgSize = font->CalcTextSizeA(sysFs, FLT_MAX, areaWidth * 0.8f, msg.text.c_str());
+        layout.sysW = layout.msgSize.x + padding * 2;
+        layout.sysH = layout.msgSize.y + padding * 2;
+        return;
+    }
+
+    layout.isSystem = false;
+    bool is_self = (msg.direction == TyrianIM::MessageDirection::Outgoing);
+    layout.senderLabel = is_self ? "You"
+        : (!convo->display_name.empty() ? convo->display_name : msg.sender);
+
+    layout.nameSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, layout.senderLabel.c_str());
+    float timeFs = font->FontSize * (fontScale * 0.85f);
+    layout.timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, msg.timestamp.c_str());
+    layout.textWrapWidth = maxBubbleWidth - padding * 2;
+    layout.msgSize = font->CalcTextSizeA(fs, FLT_MAX, layout.textWrapWidth, msg.text.c_str());
+
+    layout.bubbleW = (std::max)(layout.nameSize.x + layout.timeSize.x + 20, layout.msgSize.x) + padding * 2;
+    if (layout.bubbleW > maxBubbleWidth) layout.bubbleW = maxBubbleWidth;
+    layout.bubbleH = layout.nameSize.y + layout.msgSize.y + padding * 2 + 4;
+}
+
+// Process a batch of pending layout recomputations per frame
+static void TickLayoutQueue(const TyrianIM::Conversation* convo, float areaWidth, float fontScale, ImFont* font) {
+    if (g_LayoutQueue.empty()) return;
+    int count = (std::min)(LAYOUT_BATCH_SIZE, (int)g_LayoutQueue.size());
+    for (int i = 0; i < count; i++) {
+        size_t idx = g_LayoutQueue.back();
+        g_LayoutQueue.pop_back();
+        ComputeBubbleLayout(convo, idx, areaWidth, fontScale, font);
+    }
+}
+
 // Settings
 static bool g_ShowQAIcon = true;
 static bool g_SoundEnabled = true;
@@ -150,6 +239,128 @@ static void PlayNotificationSound(const std::string& filename) {
     } else {
         PlaySoundA(fullPath.c_str(), NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
     }
+}
+
+// Build LPARAM for WM_KEYDOWN/WM_KEYUP messages
+static LPARAM GetKeyLParam(uint32_t vk, bool down) {
+    int64_t lp = !down ? 1 : 0; // transition state
+    lp = lp << 1;
+    lp += !down ? 1 : 0; // previous key state
+    lp = lp << 1;
+    lp += 0; // context code
+    lp = lp << 1;
+    lp = lp << 4;
+    lp = lp << 1;
+    lp = lp << 8;
+    lp += MapVirtualKeyA(vk, MAPVK_VK_TO_VSC);
+    lp = lp << 16;
+    lp += 1;
+    return (LPARAM)lp;
+}
+
+// Copy wide string to clipboard
+static bool CopyToClipboard(HWND hwnd, const std::wstring& text) {
+    if (!OpenClipboard(hwnd)) return false;
+    EmptyClipboard();
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sizeof(WCHAR) * (text.length() + 1));
+    if (!hMem) { CloseClipboard(); return false; }
+    WCHAR* dst = (WCHAR*)GlobalLock(hMem);
+    if (dst) {
+        wcscpy(dst, text.c_str());
+        GlobalUnlock(hMem);
+        SetClipboardData(CF_UNICODETEXT, hMem);
+    }
+    CloseClipboard();
+    return true;
+}
+
+// Send a whisper via the chatbox using clipboard paste
+// Runs on a detached thread; uses the Chat Shorts hybrid pattern
+static void SendWhisperViaChatbox(const std::string& recipient, const std::string& message) {
+    if (!g_MumbleLink) return;
+
+    // Lazily find the game window handle
+    if (!g_GameHWND) {
+        g_GameHWND = FindWindowA("ArenaNet_Dx_Window_Class", nullptr);
+        if (!g_GameHWND) g_GameHWND = FindWindowA("ArenaNet_Gr_Window_Class", nullptr);
+        if (!g_GameHWND) return;
+    }
+
+    // Convert recipient and message to wide strings separately
+    auto toWide = [](const std::string& s) -> std::wstring {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+        std::wstring ws(wlen - 1, 0);
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], wlen);
+        return ws;
+    };
+
+    std::wstring wrecip = toWide(recipient);
+    std::wstring wmsg = toWide(message);
+    HWND hwnd = g_GameHWND;
+    int delay = g_SendDelay;
+
+    // Capture the SendToGameOnly function pointer for use on the send thread
+    auto sendToGame = APIDefs->WndProc_SendToGameOnly;
+
+    std::thread([wrecip, wmsg, hwnd, delay, sendToGame]() {
+        std::lock_guard<std::mutex> lock(g_SendMutex);
+        g_IsSending = true;
+
+        auto pasteClipboard = [&](const std::wstring& text) {
+            if (!CopyToClipboard(hwnd, text)) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+            // Ctrl down (SendInput for modifier)
+            INPUT ctrlDown[1] = {};
+            ctrlDown[0].type = INPUT_KEYBOARD;
+            ctrlDown[0].ki.wVk = VK_CONTROL;
+            SendInput(ARRAYSIZE(ctrlDown), ctrlDown, sizeof(INPUT));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+            // V key (bypass ImGui, send directly to game)
+            sendToGame(hwnd, WM_KEYDOWN, 'V', GetKeyLParam('V', true));
+            sendToGame(hwnd, WM_KEYUP, 'V', GetKeyLParam('V', false));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+            // Ctrl up (SendInput)
+            INPUT ctrlUp[1] = {};
+            ctrlUp[0].type = INPUT_KEYBOARD;
+            ctrlUp[0].ki.wVk = VK_CONTROL;
+            ctrlUp[0].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(ARRAYSIZE(ctrlUp), ctrlUp, sizeof(INPUT));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        };
+
+        // If chatbox is already focused, close it first
+        if (g_MumbleLink && g_MumbleLink->Context.IsTextboxFocused) {
+            sendToGame(hwnd, WM_KEYDOWN, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, true));
+            sendToGame(hwnd, WM_KEYUP, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, false));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        }
+
+        // Step 1: Open chatbox, paste "/w "
+        sendToGame(hwnd, WM_KEYDOWN, VK_RETURN, GetKeyLParam(VK_RETURN, true));
+        sendToGame(hwnd, WM_KEYUP, VK_RETURN, GetKeyLParam(VK_RETURN, false));
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        pasteClipboard(L"/w ");
+
+        // Step 2: Paste recipient name
+        pasteClipboard(wrecip);
+
+        // Step 3: Tab to set whisper target
+        sendToGame(hwnd, WM_KEYDOWN, VK_TAB, GetKeyLParam(VK_TAB, true));
+        sendToGame(hwnd, WM_KEYUP, VK_TAB, GetKeyLParam(VK_TAB, false));
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+
+        // Step 4: Paste message
+        pasteClipboard(wmsg);
+
+        // Step 5: Send with Enter
+        sendToGame(hwnd, WM_KEYDOWN, VK_RETURN, GetKeyLParam(VK_RETURN, true));
+        sendToGame(hwnd, WM_KEYUP, VK_RETURN, GetKeyLParam(VK_RETURN, false));
+
+        g_IsSending = false;
+    }).detach();
 }
 
 // GW2 account names match "Name.1234" (dot followed by digits)
@@ -339,6 +550,7 @@ static void SaveSettings() {
     f << "font_scale=" << g_FontScale << "\n";
     f << "icon_scale=" << g_FloatingIconScale << "\n";
     f << "show_qa_icon=" << (g_ShowQAIcon ? 1 : 0) << "\n";
+    f << "send_delay=" << g_SendDelay << "\n";
 }
 
 static void LoadSettings() {
@@ -357,6 +569,7 @@ static void LoadSettings() {
         else if (key == "sound_enabled") g_SoundEnabled = (val == "1");
         else if (key == "floating_icon_locked") g_FloatingIconLocked = (val == "1");
         else if (key == "show_qa_icon") g_ShowQAIcon = (val == "1");
+        else if (key == "send_delay") try { g_SendDelay = std::stoi(val); if (g_SendDelay < 10) g_SendDelay = 10; if (g_SendDelay > 200) g_SendDelay = 200; } catch (...) {}
         else if (key == "floating_icon_only_on_unread") g_FloatingIconOnlyOnUnread = (val == "1");
         else if (key == "floating_icon_flash_duration") try { g_FloatingIconFlashDuration = std::stof(val); if (g_FloatingIconFlashDuration < 1.0f) g_FloatingIconFlashDuration = 1.0f; if (g_FloatingIconFlashDuration > 10.0f) g_FloatingIconFlashDuration = 10.0f; } catch (...) {}
         else if (key == "font_scale") try { g_FontScale = std::stof(val); if (g_FontScale < 0.8f) g_FontScale = 0.8f; if (g_FontScale > 2.0f) g_FontScale = 2.0f; } catch (...) {}
@@ -720,76 +933,97 @@ static void RenderMessageArea() {
         ImFont* font = ImGui::GetFont();
         float fs = font->FontSize * g_FontScale;
         float areaWidth = ImGui::GetContentRegionAvail().x;
-        float maxBubbleWidth = areaWidth * 0.75f;
         float padding = 10.0f;
         float bubbleRound = 10.0f;
 
+        // --- Bubble layout cache management ---
+        bool cacheInvalid = (g_BubbleCache.contact != convo->contact);
+        bool layoutParamsChanged = (g_BubbleCache.areaWidth != areaWidth || g_BubbleCache.fontScale != g_FontScale);
+        bool newMessages = (convo->messages.size() != g_BubbleCache.messageCount);
+
+        if (cacheInvalid) {
+            // Switched conversation — full rebuild synchronously (user action, acceptable)
+            g_BubbleCache.contact = convo->contact;
+            g_BubbleCache.areaWidth = areaWidth;
+            g_BubbleCache.fontScale = g_FontScale;
+            g_BubbleCache.messageCount = convo->messages.size();
+            g_BubbleCache.layouts.resize(convo->messages.size());
+            g_LayoutQueue.clear();
+            for (size_t i = 0; i < convo->messages.size(); i++) {
+                ComputeBubbleLayout(convo, i, areaWidth, g_FontScale, font);
+            }
+        } else if (layoutParamsChanged) {
+            // Width or scale changed — queue all for amortized recompute
+            g_BubbleCache.areaWidth = areaWidth;
+            g_BubbleCache.fontScale = g_FontScale;
+            g_BubbleCache.messageCount = convo->messages.size();
+            g_BubbleCache.layouts.resize(convo->messages.size());
+            g_LayoutQueue.clear();
+            for (size_t i = 0; i < convo->messages.size(); i++) {
+                g_LayoutQueue.push_back(i);
+            }
+        } else if (newMessages) {
+            // New messages appended — compute only the new ones synchronously
+            size_t oldCount = g_BubbleCache.messageCount;
+            g_BubbleCache.messageCount = convo->messages.size();
+            g_BubbleCache.layouts.resize(convo->messages.size());
+            for (size_t i = oldCount; i < convo->messages.size(); i++) {
+                ComputeBubbleLayout(convo, i, areaWidth, g_FontScale, font);
+            }
+        }
+
+        // Process amortized batch (for resize/scale changes)
+        TickLayoutQueue(convo, areaWidth, g_FontScale, font);
+
         ImGui::Spacing();
 
-        for (const auto& msg : convo->messages) {
+        // Static buffer for InvisibleButton IDs (avoid per-message heap allocation)
+        char bubbleIdBuf[32];
+
+        for (size_t mi = 0; mi < convo->messages.size() && mi < g_BubbleCache.layouts.size(); mi++) {
+            const auto& msg = convo->messages[mi];
+            const auto& layout = g_BubbleCache.layouts[mi];
+
             // System/error messages — centered, distinct style
-            if (msg.direction == TyrianIM::MessageDirection::System) {
+            if (layout.isSystem) {
                 float sysFs = font->FontSize * (g_FontScale * 0.85f);
-                ImVec2 sysMsgSize = font->CalcTextSizeA(sysFs, FLT_MAX, areaWidth * 0.8f, msg.text.c_str());
                 ImVec2 cursor = ImGui::GetCursorScreenPos();
-                float sysW = sysMsgSize.x + padding * 2;
-                float sysH = sysMsgSize.y + padding * 2;
-                float sysX = cursor.x + (areaWidth - sysW) * 0.5f;
+                float sysX = cursor.x + (areaWidth - layout.sysW) * 0.5f;
                 dl->AddRectFilled(
-                    ImVec2(sysX, cursor.y), ImVec2(sysX + sysW, cursor.y + sysH),
+                    ImVec2(sysX, cursor.y), ImVec2(sysX + layout.sysW, cursor.y + layout.sysH),
                     IM_COL32(80, 20, 20, 180), 8.0f);
                 font->RenderText(dl, sysFs,
                     ImVec2(sysX + padding, cursor.y + padding),
                     IM_COL32(255, 120, 120, 255),
-                    ImVec4(sysX + padding, cursor.y + padding, sysX + sysW - padding, cursor.y + sysH),
+                    ImVec4(sysX + padding, cursor.y + padding, sysX + layout.sysW - padding, cursor.y + layout.sysH),
                     msg.text.c_str(), msg.text.c_str() + msg.text.size(), areaWidth * 0.8f);
-                ImGui::Dummy(ImVec2(0, sysH + 6));
+                ImGui::Dummy(ImVec2(0, layout.sysH + 6));
                 continue;
             }
 
             bool is_self = (msg.direction == TyrianIM::MessageDirection::Outgoing);
 
-            // Build sender label
-            std::string senderLabel;
-            if (is_self) {
-                senderLabel = "You";
-            } else {
-                senderLabel = (!convo->display_name.empty()) ? convo->display_name : msg.sender;
-            }
-
-            // Calculate text sizes with scaled font
-            ImVec2 nameSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, senderLabel.c_str());
-            float timeFs = font->FontSize * (g_FontScale * 0.85f);
-            ImVec2 timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, msg.timestamp.c_str());
-            float textWrapWidth = maxBubbleWidth - padding * 2;
-            ImVec2 msgSize = font->CalcTextSizeA(fs, FLT_MAX, textWrapWidth, msg.text.c_str());
-
-            // Bubble dimensions
-            float bubbleW = (std::max)(nameSize.x + timeSize.x + 20, msgSize.x) + padding * 2;
-            if (bubbleW > maxBubbleWidth) bubbleW = maxBubbleWidth;
-            float bubbleH = nameSize.y + msgSize.y + padding * 2 + 4;
-
             // Position: right-aligned for self, left-aligned for other
             ImVec2 cursor = ImGui::GetCursorScreenPos();
-            float bubbleX = is_self ? (cursor.x + areaWidth - bubbleW - 8) : (cursor.x + 8);
+            float bubbleX = is_self ? (cursor.x + areaWidth - layout.bubbleW - 8) : (cursor.x + 8);
 
             // Draw bubble
             ImU32 bubbleCol = is_self ? COLOR_BUBBLE_SELF : COLOR_BUBBLE_OTHER;
             dl->AddRectFilled(
                 ImVec2(bubbleX, cursor.y),
-                ImVec2(bubbleX + bubbleW, cursor.y + bubbleH),
+                ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
                 bubbleCol, bubbleRound);
 
             // Failed message indicator: red border + red "!" to the left
             if (msg.failed) {
                 dl->AddRect(
                     ImVec2(bubbleX, cursor.y),
-                    ImVec2(bubbleX + bubbleW, cursor.y + bubbleH),
+                    ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
                     IM_COL32(220, 40, 40, 255), bubbleRound, 0, 2.0f);
                 const char* failIcon = "!";
                 ImVec2 failSize = font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.0f, failIcon);
                 float failX = bubbleX - failSize.x - 6;
-                float failY = cursor.y + (bubbleH - failSize.y) * 0.5f;
+                float failY = cursor.y + (layout.bubbleH - failSize.y) * 0.5f;
                 dl->AddText(font, fs * 1.2f, ImVec2(failX, failY),
                     IM_COL32(220, 40, 40, 255), failIcon);
             }
@@ -797,25 +1031,26 @@ static void RenderMessageArea() {
             // Sender name (left of bubble)
             ImVec4 nameCol = is_self ? COLOR_SELF : COLOR_OTHER;
             dl->AddText(font, fs, ImVec2(bubbleX + padding, cursor.y + padding),
-                ImGui::ColorConvertFloat4ToU32(nameCol), senderLabel.c_str());
+                ImGui::ColorConvertFloat4ToU32(nameCol), layout.senderLabel.c_str());
 
             // Timestamp (right of name line, slightly smaller)
+            float timeFs = font->FontSize * (g_FontScale * 0.85f);
             dl->AddText(font, timeFs,
-                ImVec2(bubbleX + bubbleW - padding - timeSize.x, cursor.y + padding + (nameSize.y - timeSize.y)),
+                ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
                 ImGui::ColorConvertFloat4ToU32(COLOR_TIMESTAMP), msg.timestamp.c_str());
 
             // Message text (wrapped)
-            float textY = cursor.y + padding + nameSize.y + 4;
+            float textY = cursor.y + padding + layout.nameSize.y + 4;
             font->RenderText(dl, fs,
                 ImVec2(bubbleX + padding, textY),
                 IM_COL32(220, 220, 220, 255),
-                ImVec4(bubbleX + padding, textY, bubbleX + bubbleW - padding, textY + msgSize.y + 10),
-                msg.text.c_str(), msg.text.c_str() + msg.text.size(), textWrapWidth);
+                ImVec4(bubbleX + padding, textY, bubbleX + layout.bubbleW - padding, textY + layout.msgSize.y + 10),
+                msg.text.c_str(), msg.text.c_str() + msg.text.size(), layout.textWrapWidth);
 
             // Click bubble to copy message
             ImGui::SetCursorScreenPos(ImVec2(bubbleX, cursor.y));
-            if (ImGui::InvisibleButton(("##bubble_" + std::to_string(msg.epoch_ms)).c_str(),
-                                       ImVec2(bubbleW, bubbleH))) {
+            snprintf(bubbleIdBuf, sizeof(bubbleIdBuf), "##b_%zu", mi);
+            if (ImGui::InvisibleButton(bubbleIdBuf, ImVec2(layout.bubbleW, layout.bubbleH))) {
                 ImGui::SetClipboardText(msg.text.c_str());
                 g_ClipboardMsg = "Copied to clipboard";
                 g_ClipboardMsgExpiry = ImGui::GetTime() + 2.0;
@@ -828,7 +1063,7 @@ static void RenderMessageArea() {
             }
 
             // Advance cursor
-            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + bubbleH + 6));
+            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + layout.bubbleH + 6));
         }
 
         if (g_ScrollToBottom) {
@@ -837,6 +1072,42 @@ static void RenderMessageArea() {
         }
 
         ImGui::EndChild();
+
+        // --- Input area ---
+        {
+            float sendBtnW = 60.0f;
+            float availW = ImGui::GetContentRegionAvail().x;
+            ImGui::PushItemWidth(availW - sendBtnW - 8);
+            if (g_FocusInput) {
+                ImGui::SetKeyboardFocusHere();
+                g_FocusInput = false;
+            }
+            bool enter_pressed = ImGui::InputText("##WhisperInput", g_InputBuf, sizeof(g_InputBuf),
+                ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::PopItemWidth();
+
+            ImGui::SameLine();
+            bool can_send = !g_IsSending && g_InputBuf[0] != '\0';
+            if (!can_send) {
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+            }
+            bool send_clicked = ImGui::Button("Send", ImVec2(sendBtnW, 0));
+            if (!can_send) {
+                ImGui::PopStyleVar();
+                send_clicked = false;
+            }
+
+            if ((enter_pressed || send_clicked) && can_send) {
+                std::string text(g_InputBuf);
+
+                // Use display_name (character name) for /w if available, otherwise account name
+                std::string whisper_target = !convo->display_name.empty() ? convo->display_name : convo->contact;
+
+                SendWhisperViaChatbox(whisper_target, text);
+                g_InputBuf[0] = '\0';
+                g_FocusInput = true;
+            }
+        }
 
         ImGui::SetWindowFontScale(1.0f);
     }
@@ -847,11 +1118,7 @@ static void RenderMessageArea() {
 // Main render function
 void AddonRender() {
     // Check if the player is logged into a character (not on character select)
-    bool isInGame = false;
-    if (APIDefs) {
-        NexusLinkData_t* nexusLink = (NexusLinkData_t*)APIDefs->DataLink_Get(DL_NEXUS_LINK);
-        isInGame = nexusLink && nexusLink->IsGameplay;
-    }
+    bool isInGame = g_NexusLink && g_NexusLink->IsGameplay;
 
     if (!isInGame) {
         // On character select — hide window and icon
@@ -947,6 +1214,18 @@ void AddonOptions() {
         }
         settings_changed = true;
     }
+
+    // --- Sending ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Sending");
+    ImGui::Spacing();
+
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::SliderInt("Send delay (ms)", &g_SendDelay, 10, 200)) {
+        settings_changed = true;
+    }
+    ImGui::TextColored(COLOR_TIMESTAMP, "Delay between each keystroke action. Increase if sends fail.");
 
     // --- Notification Icon ---
     ImGui::Spacing();
@@ -1081,6 +1360,10 @@ void AddonLoad(AddonAPI_t* aApi) {
     // Attempt to install whisper hooks (will log warning that patterns aren't defined yet)
     TyrianIM::WhisperHook::InstallHooks();
 
+    // Cache data link pointers (avoid per-frame DataLink_Get calls)
+    g_MumbleLink = (Mumble::Data*)APIDefs->DataLink_Get(DL_MUMBLE_LINK);
+    g_NexusLink = (NexusLinkData_t*)APIDefs->DataLink_Get(DL_NEXUS_LINK);
+
     // Subscribe to squad/party chat events from Unofficial Extras (testbed)
     APIDefs->Events_Subscribe(EV_UNOFFICIAL_EXTRAS_CHAT_MESSAGE, OnChatMessage);
 
@@ -1140,18 +1423,18 @@ void ProcessKeybind(const char* aIdentifier, bool aIsRelease) {
 extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef() {
     AddonDef.Signature = 0x584b6b2f;
     AddonDef.APIVersion = NEXUS_API_VERSION;
-    AddonDef.Name = "Tyrian IM";
+    AddonDef.Name = "Tyrian Instant Messenger";
     AddonDef.Version.Major = V_MAJOR;
     AddonDef.Version.Minor = V_MINOR;
     AddonDef.Version.Build = V_BUILD;
     AddonDef.Version.Revision = V_REVISION;
-    AddonDef.Author = "TyrianIM";
+    AddonDef.Author = "PieOrCake.7635";
     AddonDef.Description = "Instant messaging window for Guild Wars 2 whispers";
     AddonDef.Load = AddonLoad;
     AddonDef.Unload = AddonUnload;
     AddonDef.Flags = AF_None;
-    AddonDef.Provider = UP_None;
-    AddonDef.UpdateLink = nullptr;
+    AddonDef.Provider = UP_GitHub;
+    AddonDef.UpdateLink = "https://github.com/PieOrCake/tim";
 
     return &AddonDef;
 }
