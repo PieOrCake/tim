@@ -1467,13 +1467,17 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
         if (auto v = nodeView("author").value<std::string>())       t.author      = *v;
         if (auto v = nodeView("description").value<std::string>())  t.description = *v;
 
-        // [style] — ImGuiStyle metrics
-        if (auto* style = nodeView("style").as_table()) {
+        // Style metrics — check [style] sub-table first, then fall back to root level
+        // (ImThemes files put these at root; our native format uses [style])
+        {
+            toml::table* styleTable = nodeView("style").as_table();
+            if (!styleTable) styleTable = themeTable;  // root-level fallback (ImThemes format)
+
             auto readF = [&](const char* k, float& v) {
-                if (auto val = (*style)[k].value<double>()) v = (float)*val;
+                if (auto val = (*styleTable)[k].value<double>()) v = (float)*val;
             };
             auto readV2 = [&](const char* k, ImVec2& v) {
-                if (auto* arr = (*style)[k].as_array(); arr && arr->size() == 2) {
+                if (auto* arr = (*styleTable)[k].as_array(); arr && arr->size() == 2) {
                     if (auto x = (*arr)[0].value<double>(), y = (*arr)[1].value<double>(); x && y)
                         v = ImVec2((float)*x, (float)*y);
                 }
@@ -1549,12 +1553,29 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
             for (auto& [name, val] : *colors) {
                 auto it = kColorMap.find(std::string(name.str()));
                 if (it == kColorMap.end()) continue;
-                auto* arr = val.as_array();
-                if (!arr || arr->size() != 4) continue;
-                auto r = (*arr)[0].value<double>(), g = (*arr)[1].value<double>(),
-                     b = (*arr)[2].value<double>(), a = (*arr)[3].value<double>();
-                if (r && g && b && a)
-                    t.imgui_style.Colors[it->second] = ImVec4((float)*r,(float)*g,(float)*b,(float)*a);
+
+                ImVec4 col;
+                bool parsed = false;
+
+                if (auto* arr = val.as_array(); arr && arr->size() == 4) {
+                    // Native format: [r, g, b, a] floats 0-1
+                    auto r = (*arr)[0].value<double>(), g = (*arr)[1].value<double>(),
+                         b = (*arr)[2].value<double>(), a = (*arr)[3].value<double>();
+                    if (r && g && b && a) {
+                        col = ImVec4((float)*r,(float)*g,(float)*b,(float)*a);
+                        parsed = true;
+                    }
+                } else if (auto s = val.value<std::string>()) {
+                    // ImThemes format: "rgba(R, G, B, A)" where RGB are 0-255, A is 0-1
+                    float r, g, b, a;
+                    if (sscanf(s->c_str(), "rgba(%f, %f, %f, %f)", &r, &g, &b, &a) == 4) {
+                        col = ImVec4(r / 255.f, g / 255.f, b / 255.f, a);
+                        parsed = true;
+                    }
+                }
+
+                if (parsed)
+                    t.imgui_style.Colors[it->second] = col;
             }
         }
 
