@@ -567,6 +567,7 @@ static bool g_FloatingIconLocked = true;
 static float g_FloatingIconScale = 1.0f;
 static bool g_FloatingIconOnlyOnUnread = false;
 static float g_FloatingIconFlashDuration = 3.0f;
+static bool g_ShowTimestamps = true;
 static std::atomic<uint64_t> g_FloatingIconFlashStartMs{0};
 static std::atomic<bool> g_PendingSound{false};
 static Texture_t* g_FloatIconTexture = nullptr;
@@ -670,8 +671,12 @@ static void ComputeBubbleLayout(const TyrianIM::Conversation* convo, size_t i,
 
     layout.nameSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, layout.senderLabel.c_str());
     layout.displayTimestamp = FormatDisplayTime(msg.epoch_ms);
-    float timeFs = font->FontSize * (fontScale * 0.85f);
-    layout.timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, layout.displayTimestamp.c_str());
+    if (g_ShowTimestamps) {
+        float timeFs = font->FontSize * (fontScale * 0.85f);
+        layout.timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, layout.displayTimestamp.c_str());
+    } else {
+        layout.timeSize = ImVec2(0, 0);
+    }
     layout.textWrapWidth = maxBubbleWidth - padding * 2;
 
     layout.seg_layouts.clear();
@@ -1162,6 +1167,7 @@ static void SaveSettings() {
     f << "show_floating_icon=" << (g_ShowFloatingIcon ? 1 : 0) << "\n";
     f << "floating_icon_x=" << g_FloatingIconX << "\n";
     f << "floating_icon_y=" << g_FloatingIconY << "\n";
+    f << "show_timestamps=" << (g_ShowTimestamps ? 1 : 0) << "\n";
     f << "sound_enabled=" << (g_SoundEnabled ? 1 : 0) << "\n";
     f << "selected_sound=" << g_SelectedSound << "\n";
     f << "floating_icon_locked=" << (g_FloatingIconLocked ? 1 : 0) << "\n";
@@ -1205,6 +1211,7 @@ static void LoadSettings() {
         if (key == "show_floating_icon") g_ShowFloatingIcon = (val == "1");
         else if (key == "floating_icon_x") try { g_FloatingIconX = std::stof(val); } catch (...) {}
         else if (key == "floating_icon_y") try { g_FloatingIconY = std::stof(val); } catch (...) {}
+        else if (key == "show_timestamps") g_ShowTimestamps = (val == "1");
         else if (key == "sound_enabled") g_SoundEnabled = (val == "1");
         else if (key == "floating_icon_locked") g_FloatingIconLocked = (val == "1");
         else if (key == "show_qa_icon") g_ShowQAIcon = (val == "1");
@@ -3369,12 +3376,14 @@ static void RenderMessageArea() {
                 ImGui::ColorConvertFloat4ToU32(nameCol), layout.senderLabel.c_str());
 
             // Timestamp (right of name line, slightly smaller)
-            float timeFs = font->FontSize * (g_FontScale * 0.85f);
-            ImVec4 tsCol = g_ActiveTheme.timestamp;
-            tsCol.w *= msgAlpha;
-            dl->AddText(font, timeFs,
-                ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
-                ImGui::ColorConvertFloat4ToU32(tsCol), layout.displayTimestamp.c_str());
+            if (g_ShowTimestamps) {
+                float timeFs = font->FontSize * (g_FontScale * 0.85f);
+                ImVec4 tsCol = g_ActiveTheme.timestamp;
+                tsCol.w *= msgAlpha;
+                dl->AddText(font, timeFs,
+                    ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
+                    ImGui::ColorConvertFloat4ToU32(tsCol), layout.displayTimestamp.c_str());
+            }
 
             // Message text (wrapped) — plain or segmented
             float textY = cursor.y + padding + layout.nameSize.y + 4;
@@ -3678,6 +3687,11 @@ void AddonOptions() {
         settings_changed = true;
     }
     ImGui::TextColored(g_ActiveTheme.timestamp, "Delay between each keystroke action. Increase if sends fail.");
+
+    if (ImGui::Checkbox("Show message timestamps", &g_ShowTimestamps)) {
+        InvalidateBubbleCache();
+        settings_changed = true;
+    }
 
     // --- Notification Icon ---
     ImGui::Spacing();
