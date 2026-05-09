@@ -1288,8 +1288,8 @@ struct ThemeGuard {
     ~ThemeGuard() { PopGW2Theme(); }
 };
 static ImGuiStyle BuildGW2Theme() {
-    ImGuiStyle g_GW2Style = ImGui::GetStyle();
-    ImGuiStyle& s = g_GW2Style;
+    ImGuiStyle style = ImGui::GetStyle();
+    ImGuiStyle& s = style;
 
     // Rounding
     s.WindowRounding    = 6.0f;
@@ -1396,7 +1396,7 @@ static ImGuiStyle BuildGW2Theme() {
     // Plot (progress bars)
     c[ImGuiCol_PlotHistogram]        = ImVec4(0.65f, 0.55f, 0.15f, 1.00f);
     c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.80f, 0.68f, 0.20f, 1.00f);
-    return g_GW2Style;
+    return style;
 }
 
 static TyrianTheme BuildDefaultTheme() {
