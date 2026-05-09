@@ -1899,13 +1899,23 @@ static void RenderFloatingIcon() {
     ImVec2 wp = ImGui::GetWindowPos();
     ImFont* font = ImGui::GetFont();
 
-    // Manual drag (SetNextWindowPos_Always disables ImGui's built-in drag)
-    if (!g_FloatingIconLocked && ImGui::IsWindowHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        ImVec2 delta = ImGui::GetIO().MouseDelta;
-        g_FloatingIconX += delta.x;
-        g_FloatingIconY += delta.y;
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
-            SaveSettings();
+    // Manual drag (SetNextWindowPos_Always disables ImGui's built-in drag).
+    // Use a latched flag so the drag only starts when the user clicks THIS window,
+    // not whenever any left mouse button event fires in-game.
+    static bool s_DraggingIcon = false;
+    if (!g_FloatingIconLocked) {
+        if (!s_DraggingIcon && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            s_DraggingIcon = true;
+        if (s_DraggingIcon) {
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                ImVec2 delta = ImGui::GetIO().MouseDelta;
+                g_FloatingIconX += delta.x;
+                g_FloatingIconY += delta.y;
+            } else {
+                s_DraggingIcon = false;
+                SaveSettings();
+            }
+        }
     }
 
     // Resolve theme icon (if set)
