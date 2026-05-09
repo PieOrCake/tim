@@ -737,7 +737,7 @@ static char g_InputBuf[200] = {};
 static bool g_FocusInput = false;
 static int g_SendDelay = 50;  // ms between keystrokes
 static std::atomic<bool> g_IsSending{false};
-static std::string g_ActiveThemeName = "GW2 Dark";
+static std::string g_ActiveThemeName = "Nexus";
 
 // --- Bubble layout cache (amortized recomputation) ---
 struct BubbleLayout {
@@ -1018,6 +1018,7 @@ static void SaveSettings();
 static void LoadSettings();
 
 struct TyrianTheme {
+    bool   inherit_style = false;  // if true, PushGW2Theme skips ImGui style swap
     // ImU32 chat colors ([R,G,B,A] 0-255)
     ImU32  bubble_self  = IM_COL32(30,  60, 100, 200);
     ImU32  bubble_other = IM_COL32(50,  50,  55, 200);
@@ -1275,7 +1276,8 @@ static int                      g_ActiveThemeIndex = 0;
 
 static void PushGW2Theme() {
     g_StyleStack.push_back(ImGui::GetStyle());
-    ImGui::GetStyle() = g_ActiveTheme.imgui_style;
+    if (!g_ActiveTheme.inherit_style)
+        ImGui::GetStyle() = g_ActiveTheme.imgui_style;
 }
 static void PopGW2Theme() {
     if (!g_StyleStack.empty()) {
@@ -1399,7 +1401,7 @@ static ImGuiStyle BuildGW2Theme() {
     return style;
 }
 
-static TyrianTheme BuildDefaultTheme() {
+static TyrianTheme BuildGW2DarkTheme() {
     TyrianTheme theme;
     theme.name        = "GW2 Dark";
     theme.author      = "TyrianIM";
@@ -1410,6 +1412,83 @@ static TyrianTheme BuildDefaultTheme() {
     theme.imgui_style = BuildGW2Theme();
     // chat colors use struct field defaults
     return theme;
+}
+
+static TyrianTheme BuildCharrSteelTheme() {
+    TyrianTheme t;
+    t.name        = "Charr Steel";
+    t.description = "Dark charcoal with blood-red accents";
+
+    ImGuiStyle& s = t.imgui_style;
+    // Copy base metrics from GW2 theme (rounding, padding etc)
+    s = BuildGW2Theme();
+
+    // Override colors
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.07f, 0.06f, 0.06f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.06f, 0.05f, 0.05f, 0.85f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.10f, 0.08f, 0.08f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.30f, 0.15f, 0.12f, 0.50f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.16f, 0.11f, 0.10f, 0.80f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.26f, 0.14f, 0.12f, 0.85f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.38f, 0.16f, 0.13f, 0.90f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.10f, 0.07f, 0.06f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.24f, 0.10f, 0.08f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.07f, 0.05f, 0.04f, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.12f, 0.08f, 0.07f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.05f, 0.04f, 0.04f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.32f, 0.14f, 0.11f, 0.80f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.44f, 0.18f, 0.14f, 0.90f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.58f, 0.22f, 0.16f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.88f, 0.18f, 0.12f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.70f, 0.14f, 0.10f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.95f, 0.22f, 0.15f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.24f, 0.10f, 0.08f, 0.80f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.40f, 0.14f, 0.10f, 0.90f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.55f, 0.18f, 0.12f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.22f, 0.09f, 0.07f, 0.70f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.36f, 0.13f, 0.10f, 0.80f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.50f, 0.17f, 0.12f, 0.90f);
+    c[ImGuiCol_Separator]            = ImVec4(0.28f, 0.12f, 0.09f, 0.40f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.44f, 0.18f, 0.13f, 0.70f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.60f, 0.22f, 0.16f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.30f, 0.12f, 0.09f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.48f, 0.18f, 0.13f, 0.60f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.65f, 0.22f, 0.16f, 0.90f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.14f, 0.08f, 0.07f, 0.86f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.36f, 0.14f, 0.10f, 0.90f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.28f, 0.11f, 0.08f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.08f, 0.05f, 0.04f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.18f, 0.08f, 0.06f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.90f, 0.86f, 0.84f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.48f, 0.40f, 0.38f, 1.00f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.80f, 0.20f, 0.14f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.75f, 0.18f, 0.12f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.90f, 0.24f, 0.16f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.14f, 0.08f, 0.07f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.28f, 0.12f, 0.09f, 0.60f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.20f, 0.10f, 0.08f, 0.40f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
+
+    // Chat-specific colors
+    t.bubble_self   = IM_COL32( 85,  20,  14, 225);
+    t.bubble_other  = IM_COL32( 46,  40,  40, 225);
+    t.header_bg     = IM_COL32( 22,  16,  15, 245);
+    t.active_bg     = IM_COL32( 72,  16,  12, 185);
+    t.input_bg      = IM_COL32( 18,  13,  12, 225);
+    t.avatar_bg     = IM_COL32(165,  28,  20, 255);
+    t.unread_dot    = IM_COL32(220,  40,  28, 255);
+    t.pin_accent    = IM_COL32(195,  32,  22, 255);
+    t.sender_self   = ImVec4(0.95f, 0.30f, 0.20f, 1.00f);
+    t.sender_other  = ImVec4(0.86f, 0.80f, 0.78f, 1.00f);
+    t.timestamp     = ImVec4(0.50f, 0.40f, 0.38f, 1.00f);
+    t.unread_label  = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
+    t.status_ok     = ImVec4(0.40f, 0.85f, 0.30f, 1.00f);
+    t.status_warn   = ImVec4(1.00f, 0.72f, 0.08f, 1.00f);
+    t.status_err    = ImVec4(1.00f, 0.30f, 0.25f, 1.00f);
+
+    return t;
 }
 
 // --- Theme management ---
@@ -1493,7 +1572,7 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
 
         auto nodeView = [&](const char* k) { return (*themeTable)[k]; };
 
-        TyrianTheme t = BuildDefaultTheme();
+        TyrianTheme t = BuildGW2DarkTheme();
         t.file_path   = path;
 
         // Metadata
@@ -1657,9 +1736,29 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
     }
 }
 
+static TyrianTheme BuildNexusTheme() {
+    TyrianTheme t;
+    t.name          = "Nexus";
+    t.description   = "Inherits the ImGui style set by Nexus";
+    t.inherit_style = true;
+    // Snapshot the live Nexus style so DeriveChatColorsFromStyle can read it;
+    // imgui_style is otherwise unused at render time (inherit_style skips the swap).
+    t.imgui_style   = ImGui::GetStyle();
+    DeriveChatColorsFromStyle(t);
+    return t;
+}
+
+using ThemeBuilder = TyrianTheme(*)();
+static const ThemeBuilder kBuiltinThemes[] = {
+    BuildNexusTheme,
+    BuildGW2DarkTheme,
+    BuildCharrSteelTheme,
+};
+
 static void ScanThemes() {
     g_LoadedThemes.clear();
-    g_LoadedThemes.push_back(BuildDefaultTheme());  // index 0: always the built-in
+    for (auto builder : kBuiltinThemes)
+        g_LoadedThemes.push_back(builder());
 
     std::string dir = ThemesDir();
     try { std::filesystem::create_directories(dir); } catch (...) {}
@@ -1673,9 +1772,10 @@ static void ScanThemes() {
         }
     } catch (...) {}
 
-    // Sort entries after index 0 alphabetically
-    if (g_LoadedThemes.size() > 1)
-        std::sort(g_LoadedThemes.begin() + 1, g_LoadedThemes.end(),
+    // Sort file-loaded entries (after builtins) alphabetically
+    constexpr size_t kNumBuiltins = std::size(kBuiltinThemes);
+    if (g_LoadedThemes.size() > kNumBuiltins)
+        std::sort(g_LoadedThemes.begin() + kNumBuiltins, g_LoadedThemes.end(),
                   [](const TyrianTheme& a, const TyrianTheme& b){ return a.name < b.name; });
 }
 
@@ -1745,14 +1845,14 @@ static void RenderFloatingIcon() {
     } else {
         // Fallback until texture loads
         dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1),
-                          IM_COL32(60, 100, 160, 200), 8.0f * s);
+                          g_ActiveTheme.bubble_self, 8.0f * s);
     }
 
     // Pulsing blue overlay when flashing (unread messages)
     if (is_flashing) {
         ImDrawList* fdl = ImGui::GetForegroundDrawList();
         fdl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1),
-                           IM_COL32(60, 120, 255, (int)(80 * flash_alpha)), 8.0f * s);
+                           (g_ActiveTheme.bubble_self & 0x00FFFFFFu) | ((ImU32)((g_ActiveTheme.bubble_self >> 24) * flash_alpha * 0.35f) << 24), 8.0f * s);
     }
 
     // Unread contact count badge (top-right corner of bubble, drawn on foreground list to avoid clipping)
@@ -1768,7 +1868,7 @@ static void RenderFloatingIcon() {
         ImVec2 badgeTextSize = font->CalcTextSizeA(badgeFs, FLT_MAX, 0.0f, badgeBuf);
         fdl->AddText(font, badgeFs,
             ImVec2(badgeCenter.x - badgeTextSize.x * 0.5f, badgeCenter.y - badgeTextSize.y * 0.5f),
-            IM_COL32(255, 255, 255, 255), badgeBuf);
+            ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.unread_label), badgeBuf);
     }
 
     // Click to toggle main window
@@ -1811,14 +1911,13 @@ void AddonOptions();
 // --- Render helpers ---
 
 static void RenderContactList(float width) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
     ImGui::BeginChild("##Contacts", ImVec2(width, 0), true);
 
     ImFont* font = ImGui::GetFont();
     float fs = font->FontSize * g_FontScale;
 
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.9f, 1.0f), "  CONVERSATIONS");
+    ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_TextDisabled], "  CONVERSATIONS");
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
@@ -1909,15 +2008,21 @@ static void RenderContactList(float width) {
         ImVec2 avatarCenter(cursor.x + 8 + avatarRadius, cursor.y + itemHeight * 0.5f);
         unsigned int nameHash = 0;
         for (char c : convo->contact) nameHash = nameHash * 31 + (unsigned char)c;
-        float hue = (nameHash % 360) / 360.0f;
-        ImVec4 avatarColor;
-        ImGui::ColorConvertHSVtoRGB(hue, 0.5f, 0.7f, avatarColor.x, avatarColor.y, avatarColor.z);
-        avatarColor.w = 1.0f;
-        dl->AddCircleFilled(avatarCenter, avatarRadius, ImGui::ColorConvertFloat4ToU32(avatarColor));
+        float letterHue = (nameHash % 360) / 360.0f;
+        float baseR = ((g_ActiveTheme.avatar_bg >> IM_COL32_R_SHIFT) & 0xFF) / 255.f;
+        float baseG = ((g_ActiveTheme.avatar_bg >> IM_COL32_G_SHIFT) & 0xFF) / 255.f;
+        float baseB = ((g_ActiveTheme.avatar_bg >> IM_COL32_B_SHIFT) & 0xFF) / 255.f;
+        float avH, avS, avV;
+        ImGui::ColorConvertRGBtoHSV(baseR, baseG, baseB, avH, avS, avV);
+        avH = fmodf(avH + letterHue, 1.0f);
+        float avR, avG, avB;
+        ImGui::ColorConvertHSVtoRGB(avH, avS, avV, avR, avG, avB);
+        ImU32 avatarFill = IM_COL32((int)(avR*255), (int)(avG*255), (int)(avB*255), 255);
+        dl->AddCircleFilled(avatarCenter, avatarRadius, avatarFill);
 
         {
             ImVec4 ringColor;
-            ImGui::ColorConvertHSVtoRGB(hue, 0.9f, 1.0f, ringColor.x, ringColor.y, ringColor.z);
+            ImGui::ColorConvertHSVtoRGB(avH, 0.9f, 1.0f, ringColor.x, ringColor.y, ringColor.z);
             ringColor.w = 1.0f;
             float ringRadius = std::min(avatarRadius + 2.0f, itemHeight * 0.5f - 1.0f);
             dl->AddCircle(avatarCenter, ringRadius,
@@ -1992,7 +2097,6 @@ static void RenderContactList(float width) {
     }
 
     ImGui::EndChild();
-    ImGui::PopStyleColor();
 }
 
 static void RenderMessageArea() {
@@ -2059,11 +2163,17 @@ static void RenderMessageArea() {
             ImVec2 hAvatarC(hPos.x + 14 + hAvatarR, hPos.y + headerH * 0.5f);
             unsigned int hHash = 0;
             for (char c : convo->contact) hHash = hHash * 31 + (unsigned char)c;
-            float hHue = (hHash % 360) / 360.0f;
-            ImVec4 hAvatarCol;
-            ImGui::ColorConvertHSVtoRGB(hHue, 0.5f, 0.7f, hAvatarCol.x, hAvatarCol.y, hAvatarCol.z);
-            hAvatarCol.w = 1.0f;
-            hdl->AddCircleFilled(hAvatarC, hAvatarR, ImGui::ColorConvertFloat4ToU32(hAvatarCol));
+            float hLetterHue = (hHash % 360) / 360.0f;
+            float hBaseR = ((g_ActiveTheme.avatar_bg >> IM_COL32_R_SHIFT) & 0xFF) / 255.f;
+            float hBaseG = ((g_ActiveTheme.avatar_bg >> IM_COL32_G_SHIFT) & 0xFF) / 255.f;
+            float hBaseB = ((g_ActiveTheme.avatar_bg >> IM_COL32_B_SHIFT) & 0xFF) / 255.f;
+            float hAvH, hAvS, hAvV;
+            ImGui::ColorConvertRGBtoHSV(hBaseR, hBaseG, hBaseB, hAvH, hAvS, hAvV);
+            hAvH = fmodf(hAvH + hLetterHue, 1.0f);
+            float hAvR, hAvG, hAvB;
+            ImGui::ColorConvertHSVtoRGB(hAvH, hAvS, hAvV, hAvR, hAvG, hAvB);
+            ImU32 hAvatarFill = IM_COL32((int)(hAvR*255), (int)(hAvG*255), (int)(hAvB*255), 255);
+            hdl->AddCircleFilled(hAvatarC, hAvatarR, hAvatarFill);
 
             // Initial in avatar
             std::string hDisplay = !convo->display_name.empty() ? convo->display_name : convo->contact;
@@ -2167,10 +2277,10 @@ static void RenderMessageArea() {
                 float sysX = cursor.x + (areaWidth - layout.sysW) * 0.5f;
                 dl->AddRectFilled(
                     ImVec2(sysX, cursor.y), ImVec2(sysX + layout.sysW, cursor.y + layout.sysH),
-                    IM_COL32(80, 20, 20, 180), 8.0f);
+                    applyAlpha(g_ActiveTheme.bubble_other, 0.7f), 8.0f);
                 font->RenderText(dl, sysFs,
                     ImVec2(sysX + padding, cursor.y + padding),
-                    IM_COL32(255, 120, 120, 255),
+                    ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.status_err),
                     ImVec4(sysX + padding, cursor.y + padding, sysX + layout.sysW - padding, cursor.y + layout.sysH),
                     msg.text.c_str(), msg.text.c_str() + msg.text.size(), areaWidth * 0.8f);
                 ImGui::Dummy(ImVec2(0, layout.sysH + 6));
@@ -2195,13 +2305,13 @@ static void RenderMessageArea() {
                 dl->AddRect(
                     ImVec2(bubbleX, cursor.y),
                     ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
-                    applyAlpha(IM_COL32(220, 40, 40, 255), msgAlpha), bubbleRound, 0, 2.0f);
+                    applyAlpha(ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.status_err), msgAlpha), bubbleRound, 0, 2.0f);
                 const char* failIcon = "!";
                 ImVec2 failSize = font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.0f, failIcon);
                 float failX = bubbleX - failSize.x - 6;
                 float failY = cursor.y + (layout.bubbleH - failSize.y) * 0.5f;
                 dl->AddText(font, fs * 1.2f, ImVec2(failX, failY),
-                    applyAlpha(IM_COL32(220, 40, 40, 255), msgAlpha), failIcon);
+                    applyAlpha(ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.status_err), msgAlpha), failIcon);
             }
 
             // Sender name (left of bubble)
@@ -2222,7 +2332,7 @@ static void RenderMessageArea() {
             float textY = cursor.y + padding + layout.nameSize.y + 4;
             font->RenderText(dl, fs,
                 ImVec2(bubbleX + padding, textY),
-                applyAlpha(IM_COL32(220, 220, 220, 255), msgAlpha),
+                applyAlpha(ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Text]), msgAlpha),
                 ImVec4(bubbleX + padding, textY, bubbleX + layout.bubbleW - padding, textY + layout.msgSize.y + 10),
                 msg.text.c_str(), msg.text.c_str() + msg.text.size(), layout.textWrapWidth);
 
@@ -2257,12 +2367,14 @@ static void RenderMessageArea() {
             float sendBtnW = 60.0f;
             float availW = ImGui::GetContentRegionAvail().x;
             ImGui::PushItemWidth(availW - sendBtnW - 8);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.input_bg));
             if (g_FocusInput) {
                 ImGui::SetKeyboardFocusHere();
                 g_FocusInput = false;
             }
             bool enter_pressed = ImGui::InputText("##WhisperInput", g_InputBuf, sizeof(g_InputBuf),
                 ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::PopStyleColor();
             ImGui::PopItemWidth();
 
             ImGui::SameLine();
@@ -2344,7 +2456,7 @@ void AddonRender() {
     // Status bar at bottom (always visible, full width, fixed position)
     ImGui::Separator();
     if (!g_ClipboardMsg.empty() && ImGui::GetTime() < g_ClipboardMsgExpiry) {
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", g_ClipboardMsg.c_str());
+        ImGui::TextColored(g_ActiveTheme.status_ok, "%s", g_ClipboardMsg.c_str());
     } else {
         g_ClipboardMsg.clear();
         ImGui::TextColored(g_ActiveTheme.timestamp, " ");
@@ -2554,7 +2666,7 @@ void AddonLoad(AddonAPI_t* aApi) {
     ImGui::SetAllocatorFunctions(
         (void* (*)(size_t, void*))APIDefs->ImguiMalloc,
         (void(*)(void*, void*))APIDefs->ImguiFree);
-    g_ActiveTheme = BuildDefaultTheme();
+    g_ActiveTheme = BuildGW2DarkTheme();
 
     // Initialize data directory
     g_DataDir = std::string(APIDefs->Paths_GetAddonDirectory("TyrianIM"));
