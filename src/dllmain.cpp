@@ -1525,6 +1525,12 @@ static void RenderContactList(float width) {
             ImGui::OpenPopup(popupId.c_str());
         }
         if (ImGui::BeginPopup(popupId.c_str())) {
+            bool isPinned = TyrianIM::ChatManager::IsPinned(convo->contact);
+            if (ImGui::MenuItem(isPinned ? "Unpin" : "Pin")) {
+                TyrianIM::ChatManager::TogglePin(convo->contact);
+                SaveSettings();
+            }
+            ImGui::Separator();
             bool srcIsAccount = IsAccountName(convo->contact);
             if (ImGui::BeginMenu("Merge into...")) {
                 for (const auto* target : conversations) {
