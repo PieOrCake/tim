@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include "../include/nexus/Nexus.h"
 #include "../include/mumble/Mumble.h"
+#include "../lib/toml.hpp"
 #include "ChatManager.h"
 #include "WhisperHook.h"
 
@@ -736,6 +737,7 @@ static char g_InputBuf[200] = {};
 static bool g_FocusInput = false;
 static int g_SendDelay = 50;  // ms between keystrokes
 static std::atomic<bool> g_IsSending{false};
+static std::string g_ActiveThemeName = "GW2 Dark";
 
 // --- Bubble layout cache (amortized recomputation) ---
 struct BubbleLayout {
@@ -1015,22 +1017,30 @@ static bool IsAccountName(const std::string& name) {
 static void SaveSettings();
 static void LoadSettings();
 
-// Colors
-static const ImVec4 COLOR_SELF(0.4f, 0.8f, 1.0f, 1.0f);      // Cyan for own messages
-static const ImVec4 COLOR_OTHER(0.9f, 0.7f, 0.3f, 1.0f);      // Gold for others
-static const ImVec4 COLOR_TIMESTAMP(0.5f, 0.5f, 0.5f, 1.0f);  // Grey
-static const ImVec4 COLOR_UNREAD(1.0f, 0.4f, 0.4f, 1.0f);     // Red for unread badge
-static const ImVec4 COLOR_STATUS_OK(0.3f, 0.9f, 0.3f, 1.0f);  // Green
-static const ImVec4 COLOR_STATUS_WARN(1.0f, 0.8f, 0.2f, 1.0f);// Yellow
-static const ImVec4 COLOR_STATUS_ERR(1.0f, 0.3f, 0.3f, 1.0f); // Red
-// Bubble colors
-static const ImU32 COLOR_BUBBLE_SELF  = IM_COL32(30, 60, 100, 200);   // Dark blue
-static const ImU32 COLOR_BUBBLE_OTHER = IM_COL32(50, 50, 55, 200);    // Dark grey
-static const ImU32 COLOR_HEADER_BG    = IM_COL32(35, 35, 45, 220);    // Header bar
-static const ImU32 COLOR_AVATAR_BG    = IM_COL32(60, 130, 180, 255);  // Avatar circle
-static const ImU32 COLOR_UNREAD_DOT   = IM_COL32(255, 80, 80, 255);   // Unread dot
-static const ImU32 COLOR_ACTIVE_BG    = IM_COL32(50, 80, 120, 180);   // Active contact bg
-static const ImU32 COLOR_INPUT_BG     = IM_COL32(30, 30, 38, 220);    // Input area bg
+struct TyrianTheme {
+    // ImU32 chat colors ([R,G,B,A] 0-255)
+    ImU32  bubble_self  = IM_COL32(30,  60, 100, 200);
+    ImU32  bubble_other = IM_COL32(50,  50,  55, 200);
+    ImU32  header_bg    = IM_COL32(35,  35,  45, 220);
+    ImU32  active_bg    = IM_COL32(50,  80, 120, 180);
+    ImU32  input_bg     = IM_COL32(30,  30,  38, 220);
+    ImU32  avatar_bg    = IM_COL32(60, 130, 180, 255);
+    ImU32  unread_dot   = IM_COL32(255, 80,  80, 255);
+    ImU32  pin_accent   = IM_COL32(180, 150, 60, 255);
+    // ImVec4 chat colors ([R,G,B,A] 0-1 floats)
+    ImVec4 sender_self  = {0.4f, 0.8f, 1.0f, 1.0f};
+    ImVec4 sender_other = {0.9f, 0.7f, 0.3f, 1.0f};
+    ImVec4 timestamp    = {0.5f, 0.5f, 0.5f, 1.0f};
+    ImVec4 unread_label = {1.0f, 0.4f, 0.4f, 1.0f};
+    ImVec4 status_ok    = {0.3f, 0.9f, 0.3f, 1.0f};
+    ImVec4 status_warn  = {1.0f, 0.8f, 0.2f, 1.0f};
+    ImVec4 status_err   = {1.0f, 0.3f, 0.3f, 1.0f};
+    // ImGui style
+    ImGuiStyle imgui_style;
+    // Metadata
+    std::string name, author, description, file_path;
+};
+
 static float g_FontScale = 1.0f;
 
 // DLL entry point
@@ -1209,6 +1219,7 @@ static void SaveSettings() {
     f << "icon_scale=" << g_FloatingIconScale << "\n";
     f << "show_qa_icon=" << (g_ShowQAIcon ? 1 : 0) << "\n";
     f << "send_delay=" << g_SendDelay << "\n";
+    f << "active_theme=" << g_ActiveThemeName << "\n";
     auto pinned = TyrianIM::ChatManager::GetPinnedContacts();
     std::sort(pinned.begin(), pinned.end());
     if (!pinned.empty()) {
@@ -1241,6 +1252,7 @@ static void LoadSettings() {
         else if (key == "floating_icon_only_on_unread") g_FloatingIconOnlyOnUnread = (val == "1");
         else if (key == "font_scale") try { g_FontScale = std::stof(val); if (g_FontScale < 0.8f) g_FontScale = 0.8f; if (g_FontScale > 2.0f) g_FontScale = 2.0f; } catch (...) {}
         else if (key == "icon_scale") try { g_FloatingIconScale = std::stof(val); if (g_FloatingIconScale < 0.5f) g_FloatingIconScale = 0.5f; if (g_FloatingIconScale > 3.0f) g_FloatingIconScale = 3.0f; } catch (...) {}
+        else if (key == "active_theme") g_ActiveThemeName = val;
         else if (key == "selected_sound" || key == "custom_sound_path") {
             g_SelectedSound = val;
         }
@@ -1256,12 +1268,14 @@ static void LoadSettings() {
 }
 
 // --- GW2 theme (mirrors Alter Ego) ---
-static ImGuiStyle              g_GW2Style;
 static std::vector<ImGuiStyle> g_StyleStack;
+static TyrianTheme              g_ActiveTheme;
+static std::vector<TyrianTheme> g_LoadedThemes;
+static int                      g_ActiveThemeIndex = 0;
 
 static void PushGW2Theme() {
     g_StyleStack.push_back(ImGui::GetStyle());
-    ImGui::GetStyle() = g_GW2Style;
+    ImGui::GetStyle() = g_ActiveTheme.imgui_style;
 }
 static void PopGW2Theme() {
     if (!g_StyleStack.empty()) {
@@ -1273,8 +1287,8 @@ struct ThemeGuard {
     ThemeGuard()  { PushGW2Theme(); }
     ~ThemeGuard() { PopGW2Theme(); }
 };
-static void BuildGW2Theme() {
-    g_GW2Style = ImGui::GetStyle();
+static ImGuiStyle BuildGW2Theme() {
+    ImGuiStyle g_GW2Style = ImGui::GetStyle();
     ImGuiStyle& s = g_GW2Style;
 
     // Rounding
@@ -1382,6 +1396,229 @@ static void BuildGW2Theme() {
     // Plot (progress bars)
     c[ImGuiCol_PlotHistogram]        = ImVec4(0.65f, 0.55f, 0.15f, 1.00f);
     c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.80f, 0.68f, 0.20f, 1.00f);
+    return g_GW2Style;
+}
+
+static TyrianTheme BuildDefaultTheme() {
+    TyrianTheme theme;
+    theme.name        = "GW2 Dark";
+    theme.author      = "TyrianIM";
+    theme.description = "Default Guild Wars 2 inspired dark theme";
+    // file_path left empty — compiled-in, no file needed
+
+    // Build and copy the GW2 style into the theme
+    theme.imgui_style = BuildGW2Theme();
+    // chat colors use struct field defaults
+    return theme;
+}
+
+// --- Theme management ---
+
+static std::string ThemesDir() {
+    return g_DataDir + "/themes";
+}
+
+static void ApplyTheme(const TyrianTheme& theme) {
+    g_ActiveTheme = theme;
+    InvalidateBubbleCache();
+}
+
+static void ApplyNamedTheme(const std::string& name) {
+    for (int i = 0; i < (int)g_LoadedThemes.size(); ++i) {
+        if (g_LoadedThemes[i].name == name) {
+            g_ActiveThemeIndex = i;
+            ApplyTheme(g_LoadedThemes[i]);
+            return;
+        }
+    }
+    // Not found — fall back to built-in (index 0)
+    if (!g_LoadedThemes.empty()) {
+        g_ActiveThemeIndex = 0;
+        ApplyTheme(g_LoadedThemes[0]);
+    }
+}
+
+static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
+    try {
+        auto doc = toml::parse_file(path);
+
+        // Support both native format (flat) and ImThemes format ([[themes]] array)
+        // themeTable points to whichever toml::table we'll read from
+        toml::table* themeTable = doc.as_table();
+        toml::table  imThemesEntry; // storage for ImThemes first-entry copy
+        if (doc.contains("themes") && doc["themes"].is_array()) {
+            auto& arr = *doc["themes"].as_array();
+            if (arr.empty()) return std::nullopt;
+            if (auto* tbl = arr[0].as_table()) {
+                imThemesEntry = *tbl;
+                themeTable = &imThemesEntry;
+            }
+        }
+        if (!themeTable) return std::nullopt;
+
+        auto nodeView = [&](const char* k) { return (*themeTable)[k]; };
+
+        TyrianTheme t = BuildDefaultTheme();
+        t.file_path   = path;
+
+        // Metadata
+        if (auto v = nodeView("name").value<std::string>())         t.name        = *v;
+        else t.name = std::filesystem::path(path).stem().string();
+        if (auto v = nodeView("author").value<std::string>())       t.author      = *v;
+        if (auto v = nodeView("description").value<std::string>())  t.description = *v;
+
+        // [style] — ImGuiStyle metrics
+        if (auto* style = nodeView("style").as_table()) {
+            auto readF = [&](const char* k, float& v) {
+                if (auto val = (*style)[k].value<double>()) v = (float)*val;
+            };
+            auto readV2 = [&](const char* k, ImVec2& v) {
+                if (auto* arr = (*style)[k].as_array(); arr && arr->size() == 2) {
+                    if (auto x = (*arr)[0].value<double>(), y = (*arr)[1].value<double>(); x && y)
+                        v = ImVec2((float)*x, (float)*y);
+                }
+            };
+            readF("windowRounding",    t.imgui_style.WindowRounding);
+            readF("childRounding",     t.imgui_style.ChildRounding);
+            readF("frameRounding",     t.imgui_style.FrameRounding);
+            readF("popupRounding",     t.imgui_style.PopupRounding);
+            readF("scrollbarRounding", t.imgui_style.ScrollbarRounding);
+            readF("grabRounding",      t.imgui_style.GrabRounding);
+            readF("tabRounding",       t.imgui_style.TabRounding);
+            readF("scrollbarSize",     t.imgui_style.ScrollbarSize);
+            readF("grabMinSize",       t.imgui_style.GrabMinSize);
+            readF("windowBorderSize",  t.imgui_style.WindowBorderSize);
+            readF("frameBorderSize",   t.imgui_style.FrameBorderSize);
+            readV2("windowPadding",    t.imgui_style.WindowPadding);
+            readV2("framePadding",     t.imgui_style.FramePadding);
+            readV2("itemSpacing",      t.imgui_style.ItemSpacing);
+            readV2("itemInnerSpacing", t.imgui_style.ItemInnerSpacing);
+        }
+
+        // [colors] — ImGui style colors (ImThemes-compatible token names)
+        if (auto* colors = nodeView("colors").as_table()) {
+            static const std::unordered_map<std::string, int> kColorMap = {
+                {"Text",                   ImGuiCol_Text},
+                {"TextDisabled",           ImGuiCol_TextDisabled},
+                {"WindowBg",               ImGuiCol_WindowBg},
+                {"ChildBg",                ImGuiCol_ChildBg},
+                {"PopupBg",                ImGuiCol_PopupBg},
+                {"Border",                 ImGuiCol_Border},
+                {"BorderShadow",           ImGuiCol_BorderShadow},
+                {"FrameBg",                ImGuiCol_FrameBg},
+                {"FrameBgHovered",         ImGuiCol_FrameBgHovered},
+                {"FrameBgActive",          ImGuiCol_FrameBgActive},
+                {"TitleBg",                ImGuiCol_TitleBg},
+                {"TitleBgActive",          ImGuiCol_TitleBgActive},
+                {"TitleBgCollapsed",       ImGuiCol_TitleBgCollapsed},
+                {"MenuBarBg",              ImGuiCol_MenuBarBg},
+                {"ScrollbarBg",            ImGuiCol_ScrollbarBg},
+                {"ScrollbarGrab",          ImGuiCol_ScrollbarGrab},
+                {"ScrollbarGrabHovered",   ImGuiCol_ScrollbarGrabHovered},
+                {"ScrollbarGrabActive",    ImGuiCol_ScrollbarGrabActive},
+                {"CheckMark",              ImGuiCol_CheckMark},
+                {"SliderGrab",             ImGuiCol_SliderGrab},
+                {"SliderGrabActive",       ImGuiCol_SliderGrabActive},
+                {"Button",                 ImGuiCol_Button},
+                {"ButtonHovered",          ImGuiCol_ButtonHovered},
+                {"ButtonActive",           ImGuiCol_ButtonActive},
+                {"Header",                 ImGuiCol_Header},
+                {"HeaderHovered",          ImGuiCol_HeaderHovered},
+                {"HeaderActive",           ImGuiCol_HeaderActive},
+                {"Separator",              ImGuiCol_Separator},
+                {"SeparatorHovered",       ImGuiCol_SeparatorHovered},
+                {"SeparatorActive",        ImGuiCol_SeparatorActive},
+                {"ResizeGrip",             ImGuiCol_ResizeGrip},
+                {"ResizeGripHovered",      ImGuiCol_ResizeGripHovered},
+                {"ResizeGripActive",       ImGuiCol_ResizeGripActive},
+                {"Tab",                    ImGuiCol_Tab},
+                {"TabHovered",             ImGuiCol_TabHovered},
+                {"TabActive",              ImGuiCol_TabActive},
+                {"TabUnfocused",           ImGuiCol_TabUnfocused},
+                {"TabUnfocusedActive",     ImGuiCol_TabUnfocusedActive},
+                {"PlotHistogram",          ImGuiCol_PlotHistogram},
+                {"PlotHistogramHovered",   ImGuiCol_PlotHistogramHovered},
+                {"TableHeaderBg",          ImGuiCol_TableHeaderBg},
+                {"TableBorderStrong",      ImGuiCol_TableBorderStrong},
+                {"TableBorderLight",       ImGuiCol_TableBorderLight},
+                {"TableRowBg",             ImGuiCol_TableRowBg},
+                {"TableRowBgAlt",          ImGuiCol_TableRowBgAlt},
+                {"NavHighlight",           ImGuiCol_NavHighlight},
+                {"ModalWindowDimBg",       ImGuiCol_ModalWindowDimBg},
+            };
+            for (auto& [name, val] : *colors) {
+                auto it = kColorMap.find(std::string(name.str()));
+                if (it == kColorMap.end()) continue;
+                auto* arr = val.as_array();
+                if (!arr || arr->size() != 4) continue;
+                auto r = (*arr)[0].value<double>(), g = (*arr)[1].value<double>(),
+                     b = (*arr)[2].value<double>(), a = (*arr)[3].value<double>();
+                if (r && g && b && a)
+                    t.imgui_style.Colors[it->second] = ImVec4((float)*r,(float)*g,(float)*b,(float)*a);
+            }
+        }
+
+        // [chat] — TyrianIM-specific colors
+        if (auto* chat = nodeView("chat").as_table()) {
+            auto readU32 = [&](const char* k, ImU32& v) {
+                auto* arr = (*chat)[k].as_array();
+                if (!arr || arr->size() != 4) return;
+                auto r = (*arr)[0].value<int64_t>(), g = (*arr)[1].value<int64_t>(),
+                     b = (*arr)[2].value<int64_t>(), a = (*arr)[3].value<int64_t>();
+                if (r && g && b && a)
+                    v = IM_COL32((int)*r,(int)*g,(int)*b,(int)*a);
+            };
+            auto readV4 = [&](const char* k, ImVec4& v) {
+                auto* arr = (*chat)[k].as_array();
+                if (!arr || arr->size() != 4) return;
+                auto r = (*arr)[0].value<double>(), g = (*arr)[1].value<double>(),
+                     b = (*arr)[2].value<double>(), a = (*arr)[3].value<double>();
+                if (r && g && b && a)
+                    v = ImVec4((float)*r,(float)*g,(float)*b,(float)*a);
+            };
+            readU32("bubble_self",  t.bubble_self);
+            readU32("bubble_other", t.bubble_other);
+            readU32("header_bg",    t.header_bg);
+            readU32("active_bg",    t.active_bg);
+            readU32("input_bg",     t.input_bg);
+            readU32("avatar_bg",    t.avatar_bg);
+            readU32("unread_dot",   t.unread_dot);
+            readU32("pin_accent",   t.pin_accent);
+            readV4("sender_self",   t.sender_self);
+            readV4("sender_other",  t.sender_other);
+            readV4("timestamp",     t.timestamp);
+            readV4("unread_label",  t.unread_label);
+            readV4("status_ok",     t.status_ok);
+            readV4("status_warn",   t.status_warn);
+            readV4("status_err",    t.status_err);
+        }
+
+        return t;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+static void ScanThemes() {
+    g_LoadedThemes.clear();
+    g_LoadedThemes.push_back(BuildDefaultTheme());  // index 0: always the built-in
+
+    std::string dir = ThemesDir();
+    try { std::filesystem::create_directories(dir); } catch (...) {}
+    try {
+        for (auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (!entry.is_regular_file()) continue;
+            if (entry.path().extension() != ".toml") continue;
+            auto theme = LoadThemeFromTOML(entry.path().string());
+            if (theme.has_value())
+                g_LoadedThemes.push_back(std::move(*theme));
+        }
+    } catch (...) {}
+
+    // Sort entries after index 0 alphabetically
+    if (g_LoadedThemes.size() > 1)
+        std::sort(g_LoadedThemes.begin() + 1, g_LoadedThemes.end(),
+                  [](const TyrianTheme& a, const TyrianTheme& b){ return a.name < b.name; });
 }
 
 // --- Floating notification icon ---
@@ -1465,7 +1702,7 @@ static void RenderFloatingIcon() {
         ImDrawList* fdl = ImGui::GetForegroundDrawList();
         float badgeRadius = 8.0f * s;
         ImVec2 badgeCenter(bx1 - 2.0f * s, by0 - 2.0f * s);
-        fdl->AddCircleFilled(badgeCenter, badgeRadius, COLOR_UNREAD_DOT, 16);
+        fdl->AddCircleFilled(badgeCenter, badgeRadius, g_ActiveTheme.unread_dot, 16);
         char badgeBuf[8];
         int displayCount = (unread_contact_count > 99) ? 99 : unread_contact_count;
         snprintf(badgeBuf, sizeof(badgeBuf), "%d", displayCount);
@@ -1534,7 +1771,7 @@ static void RenderContactList(float width) {
         ImGui::Spacing();
         ImGui::TextWrapped("No conversations yet.");
         ImGui::Spacing();
-        ImGui::TextColored(COLOR_TIMESTAMP, "Whispers will appear here.");
+        ImGui::TextColored(g_ActiveTheme.timestamp, "Whispers will appear here.");
     }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1550,14 +1787,14 @@ static void RenderContactList(float width) {
             dl->AddRectFilled(
                 ImVec2(cursor.x, cursor.y),
                 ImVec2(cursor.x + width - 16, cursor.y + itemHeight),
-                COLOR_ACTIVE_BG, 6.0f);
+                g_ActiveTheme.active_bg, 6.0f);
         }
 
         if (convo->pinned) {
             dl->AddRectFilled(
                 ImVec2(cursor.x + 2, cursor.y + 3),
                 ImVec2(cursor.x + 4, cursor.y + itemHeight - 3),
-                IM_COL32(212, 175, 55, 200));
+                g_ActiveTheme.pin_accent);
         }
 
         if (ImGui::Selectable(("##contact_" + convo->contact).c_str(), false, 0, ImVec2(0, itemHeight))) {
@@ -1652,7 +1889,7 @@ static void RenderContactList(float width) {
             ImVec2 nameSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, primaryName.c_str());
             float badgeRadius = fs * 0.55f;
             ImVec2 badgeCenter(textX + nameSize.x + badgeRadius + 5.0f, cursor.y + 6.0f + fs * 0.5f);
-            dl->AddCircleFilled(badgeCenter, badgeRadius, COLOR_UNREAD_DOT, 12);
+            dl->AddCircleFilled(badgeCenter, badgeRadius, g_ActiveTheme.unread_dot, 12);
             float badgeFs = fs * 0.72f;
             ImVec2 countSize = font->CalcTextSizeA(badgeFs, FLT_MAX, 0.0f, unreadBuf);
             dl->AddText(font, badgeFs,
@@ -1665,7 +1902,7 @@ static void RenderContactList(float width) {
         if (!convo->display_name.empty() && convo->display_name != convo->contact) {
             float subFs = font->FontSize * (g_FontScale * 0.85f);
             dl->AddText(font, subFs, ImVec2(textX, cursor.y + 6 + fs + 2),
-                ImGui::ColorConvertFloat4ToU32(COLOR_TIMESTAMP), convo->contact.c_str());
+                ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.timestamp), convo->contact.c_str());
         }
     }
 
@@ -1675,7 +1912,7 @@ static void RenderContactList(float width) {
     }
     if (ImGui::BeginPopupModal("Confirm Delete", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
         ImGui::Text("Delete conversation with");
-        ImGui::TextColored(COLOR_OTHER, "%s", g_PendingDeleteContact.c_str());
+        ImGui::TextColored(g_ActiveTheme.sender_other, "%s", g_PendingDeleteContact.c_str());
         ImGui::Text("This will also delete the chat history file.");
         ImGui::Spacing();
         if (ImGui::Button("Yes", ImVec2(80, 0))) {
@@ -1711,13 +1948,13 @@ static void RenderMessageArea() {
         const char* title = "Tyrian Instant Messaging";
         float title_w = ImGui::CalcTextSize(title).x;
         ImGui::SetCursorPosX((avail.x - title_w) * 0.5f);
-        ImGui::TextColored(COLOR_SELF, "%s", title);
+        ImGui::TextColored(g_ActiveTheme.sender_self, "%s", title);
 
         ImGui::Spacing();
         const char* subtitle = "Select a conversation or wait for messages";
         float sub_w = ImGui::CalcTextSize(subtitle).x;
         ImGui::SetCursorPosX((avail.x - sub_w) * 0.5f);
-        ImGui::TextColored(COLOR_TIMESTAMP, "%s", subtitle);
+        ImGui::TextColored(g_ActiveTheme.timestamp, "%s", subtitle);
 
         ImGui::Spacing();
         ImGui::Spacing();
@@ -1727,9 +1964,9 @@ static void RenderMessageArea() {
         ImGui::SetCursorPosX((avail.x - status_w) * 0.5f);
         ImGui::Text("%s", status_label);
         ImGui::SameLine();
-        ImVec4 status_color = (status == TyrianIM::HookStatus::Hooked) ? COLOR_STATUS_OK
-                            : (status == TyrianIM::HookStatus::Failed) ? COLOR_STATUS_ERR
-                            : COLOR_STATUS_WARN;
+        ImVec4 status_color = (status == TyrianIM::HookStatus::Hooked) ? g_ActiveTheme.status_ok
+                            : (status == TyrianIM::HookStatus::Failed) ? g_ActiveTheme.status_err
+                            : g_ActiveTheme.status_warn;
         ImGui::TextColored(status_color, "%s", TyrianIM::WhisperHook::GetStatusString());
 
     } else {
@@ -1757,7 +1994,7 @@ static void RenderMessageArea() {
             ImVec2 hPos = ImGui::GetCursorScreenPos();
             float headerH = 28.0f + 16.0f * g_FontScale;
             hdl->AddRectFilled(hPos, ImVec2(hPos.x + ImGui::GetContentRegionAvail().x, hPos.y + headerH),
-                COLOR_HEADER_BG, 4.0f);
+                g_ActiveTheme.header_bg, 4.0f);
 
             // Avatar in header
             float hAvatarR = 8.0f + 6.0f * g_FontScale;
@@ -1786,7 +2023,7 @@ static void RenderMessageArea() {
             // Account name subtitle
             if (!convo->display_name.empty() && convo->display_name != convo->contact) {
                 hdl->AddText(font, subFs, ImVec2(hTextX, hPos.y + 6 + fs + 2),
-                    ImGui::ColorConvertFloat4ToU32(COLOR_TIMESTAMP), convo->contact.c_str());
+                    ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.timestamp), convo->contact.c_str());
             }
 
             ImGui::Dummy(ImVec2(0, headerH + 4));
@@ -1889,7 +2126,7 @@ static void RenderMessageArea() {
             float bubbleX = is_self ? (cursor.x + areaWidth - layout.bubbleW - 8) : (cursor.x + 8);
 
             // Draw bubble
-            ImU32 bubbleCol = applyAlpha(is_self ? COLOR_BUBBLE_SELF : COLOR_BUBBLE_OTHER, msgAlpha);
+            ImU32 bubbleCol = applyAlpha(is_self ? g_ActiveTheme.bubble_self : g_ActiveTheme.bubble_other, msgAlpha);
             dl->AddRectFilled(
                 ImVec2(bubbleX, cursor.y),
                 ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
@@ -1910,14 +2147,14 @@ static void RenderMessageArea() {
             }
 
             // Sender name (left of bubble)
-            ImVec4 nameCol = is_self ? COLOR_SELF : COLOR_OTHER;
+            ImVec4 nameCol = is_self ? g_ActiveTheme.sender_self : g_ActiveTheme.sender_other;
             nameCol.w *= msgAlpha;
             dl->AddText(font, fs, ImVec2(bubbleX + padding, cursor.y + padding),
                 ImGui::ColorConvertFloat4ToU32(nameCol), layout.senderLabel.c_str());
 
             // Timestamp (right of name line, slightly smaller)
             float timeFs = font->FontSize * (g_FontScale * 0.85f);
-            ImVec4 tsCol = COLOR_TIMESTAMP;
+            ImVec4 tsCol = g_ActiveTheme.timestamp;
             tsCol.w *= msgAlpha;
             dl->AddText(font, timeFs,
                 ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
@@ -2052,7 +2289,7 @@ void AddonRender() {
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", g_ClipboardMsg.c_str());
     } else {
         g_ClipboardMsg.clear();
-        ImGui::TextColored(COLOR_TIMESTAMP, " ");
+        ImGui::TextColored(g_ActiveTheme.timestamp, " ");
     }
 
     ImGui::End();
@@ -2074,13 +2311,13 @@ void AddonOptions() {
 
     // --- Status ---
     auto status = TyrianIM::WhisperHook::GetStatus();
-    ImVec4 sc = (status == TyrianIM::HookStatus::Hooked) ? COLOR_STATUS_OK
-              : (status == TyrianIM::HookStatus::Failed) ? COLOR_STATUS_ERR
-              : COLOR_STATUS_WARN;
+    ImVec4 sc = (status == TyrianIM::HookStatus::Hooked) ? g_ActiveTheme.status_ok
+              : (status == TyrianIM::HookStatus::Failed) ? g_ActiveTheme.status_err
+              : g_ActiveTheme.status_warn;
     ImGui::Text("Status:");
     ImGui::SameLine();
     ImGui::TextColored(sc, "%s", TyrianIM::WhisperHook::GetStatusString());
-    ImGui::TextColored(COLOR_TIMESTAMP, "Requires 'Events: Chat' addon from the Nexus library.");
+    ImGui::TextColored(g_ActiveTheme.timestamp, "Requires 'Events: Chat' addon from the Nexus library.");
 
     bool settings_changed = false;
 
@@ -2093,6 +2330,42 @@ void AddonOptions() {
     ImGui::SetNextItemWidth(150);
     if (ImGui::SliderFloat("Font scale", &g_FontScale, 0.8f, 2.0f, "%.1f")) {
         settings_changed = true;
+    }
+
+    // Theme selection
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Theme");
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(200);
+    const char* themePreview = g_LoadedThemes.empty() ? "GW2 Dark"
+                             : g_LoadedThemes[g_ActiveThemeIndex].name.c_str();
+    if (ImGui::BeginCombo("##ThemeSelect", themePreview)) {
+        for (int i = 0; i < (int)g_LoadedThemes.size(); ++i) {
+            bool sel = (i == g_ActiveThemeIndex);
+            if (ImGui::Selectable(g_LoadedThemes[i].name.c_str(), sel)) {
+                if (i != g_ActiveThemeIndex) {
+                    g_ActiveThemeIndex = i;
+                    g_ActiveThemeName  = g_LoadedThemes[i].name;
+                    ApplyTheme(g_LoadedThemes[i]);
+                    settings_changed = true;
+                }
+            }
+            if (sel) ImGui::SetItemDefaultFocus();
+            if (ImGui::IsItemHovered() && !g_LoadedThemes[i].description.empty()) {
+                ImGui::BeginTooltip();
+                if (!g_LoadedThemes[i].author.empty())
+                    ImGui::TextDisabled("by %s", g_LoadedThemes[i].author.c_str());
+                ImGui::TextUnformatted(g_LoadedThemes[i].description.c_str());
+                ImGui::EndTooltip();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Refresh##Themes")) {
+        ScanThemes();
+        ApplyNamedTheme(g_ActiveThemeName);
     }
 
     if (ImGui::Checkbox("Show quick access icon", &g_ShowQAIcon)) {
@@ -2114,7 +2387,7 @@ void AddonOptions() {
     if (ImGui::SliderInt("Send delay (ms)", &g_SendDelay, 10, 200)) {
         settings_changed = true;
     }
-    ImGui::TextColored(COLOR_TIMESTAMP, "Delay between each keystroke action. Increase if sends fail.");
+    ImGui::TextColored(g_ActiveTheme.timestamp, "Delay between each keystroke action. Increase if sends fail.");
 
     // --- Notification Icon ---
     ImGui::Spacing();
@@ -2178,7 +2451,7 @@ void AddonOptions() {
             PlayNotificationSound(g_SelectedSound);
         }
         ImGui::SameLine();
-        ImGui::TextColored(COLOR_TIMESTAMP, "Place .wav/.mp3 files in: addons/TyrianIM/sounds/");
+        ImGui::TextColored(g_ActiveTheme.timestamp, "Place .wav/.mp3 files in: addons/TyrianIM/sounds/");
         ImGui::Unindent();
     }
 
@@ -2207,7 +2480,7 @@ void AddonOptions() {
             TyrianIM::WhisperHook::SetProbeMode(probe);
         }
         if (probe) {
-            ImGui::TextColored(COLOR_STATUS_WARN, "Dumping raw event data to debug window.");
+            ImGui::TextColored(g_ActiveTheme.status_warn, "Dumping raw event data to debug window.");
         }
     }
 
@@ -2223,13 +2496,15 @@ void AddonLoad(AddonAPI_t* aApi) {
     ImGui::SetAllocatorFunctions(
         (void* (*)(size_t, void*))APIDefs->ImguiMalloc,
         (void(*)(void*, void*))APIDefs->ImguiFree);
-    BuildGW2Theme();
+    g_ActiveTheme = BuildDefaultTheme();
 
     // Initialize data directory
     g_DataDir = std::string(APIDefs->Paths_GetAddonDirectory("TyrianIM"));
 
     // Load settings first (icon position, sound prefs, etc.)
     LoadSettings();
+    ScanThemes();
+    ApplyNamedTheme(g_ActiveThemeName);
     g_SessionStartMs = NowEpochMs();
     ScanSoundFiles();
 
