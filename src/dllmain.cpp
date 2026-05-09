@@ -544,6 +544,10 @@ bool g_WindowVisible = false;
 static std::string g_SelectedContact;
 static std::string g_PendingDeleteContact;
 static bool g_ContextMenuContactPinned = false;
+static std::unordered_map<std::string, std::string> g_ContactNotes;
+static std::string g_NoteEditContact;
+static char        g_NoteEditBuf[500] = {};
+static bool        g_NoteEditOpen     = false;
 static std::vector<std::string> g_PinnedContactNames;
 static std::string g_ClipboardMsg;
 static uint64_t g_SessionStartMs = 0;
@@ -1177,6 +1181,15 @@ static void SaveSettings() {
         }
         f << "pinned_contacts=" << joined << "\n";
     }
+    for (const auto& [contact, note] : g_ContactNotes) {
+        if (note.empty()) continue;
+        std::string escaped;
+        for (char c : note) {
+            if (c == '\r') continue;          // strip carriage returns
+            escaped += (c == '\n') ? "\\n" : std::string(1, c);
+        }
+        f << "note_" << contact << "=" << escaped << "\n";
+    }
 }
 
 static void LoadSettings() {
@@ -1209,6 +1222,18 @@ static void LoadSettings() {
             std::string token;
             while (std::getline(ss, token, ','))
                 if (!token.empty()) g_PinnedContactNames.push_back(token);
+        }
+        else if (key.size() > 5 && key.substr(0, 5) == "note_") {
+            std::string contact = key.substr(5);
+            std::string note;
+            for (size_t ni = 0; ni < val.size(); ni++) {
+                if (val[ni] == '\\' && ni + 1 < val.size() && val[ni+1] == 'n') {
+                    note += '\n'; ni++;
+                } else {
+                    note += val[ni];
+                }
+            }
+            g_ContactNotes[contact] = note;
         }
     }
 }
@@ -2899,6 +2924,15 @@ static void RenderContactList(float width) {
             ImGui::OpenPopup(popupId.c_str());
         }
         if (ImGui::BeginPopup(popupId.c_str())) {
+            if (ImGui::MenuItem("Edit note\xe2\x80\xa6")) {
+                g_NoteEditContact = convo->contact;
+                auto nit2 = g_ContactNotes.find(convo->contact);
+                const std::string& n = (nit2 != g_ContactNotes.end()) ? nit2->second : std::string();
+                strncpy(g_NoteEditBuf, n.c_str(), sizeof(g_NoteEditBuf) - 1);
+                g_NoteEditBuf[sizeof(g_NoteEditBuf) - 1] = '\0';
+                g_NoteEditOpen = true;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem(g_ContextMenuContactPinned ? "Unpin" : "Pin")) {
                 TyrianIM::ChatManager::TogglePin(convo->contact);
                 SaveSettings();
@@ -2988,11 +3022,23 @@ static void RenderContactList(float width) {
         }
 
 
-        // Subtitle
-        if (!convo->display_name.empty() && convo->display_name != convo->contact) {
+        // Subtitle: note takes priority over account name
+        {
             float subFs = font->FontSize * (g_FontScale * 0.85f);
-            dl->AddText(font, subFs, ImVec2(textX, cursor.y + 6 + fs + 2),
-                ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.timestamp), convo->contact.c_str());
+            auto nit = g_ContactNotes.find(convo->contact);
+            if (nit != g_ContactNotes.end() && !nit->second.empty()) {
+                const std::string& noteText = nit->second;
+                size_t nl = noteText.find('\n');
+                size_t firstLineLen = (nl == std::string::npos) ? noteText.size() : nl;
+                bool truncated = firstLineLen > 32;
+                std::string snippet = noteText.substr(0, std::min(firstLineLen, (size_t)32));
+                if (truncated) snippet += "\xe2\x80\xa6"; // … only when first line exceeded 32 chars
+                dl->AddText(font, subFs, ImVec2(textX, cursor.y + 6 + fs + 2),
+                    IM_COL32(160, 200, 160, 180), snippet.c_str());
+            } else if (!convo->display_name.empty() && convo->display_name != convo->contact) {
+                dl->AddText(font, subFs, ImVec2(textX, cursor.y + 6 + fs + 2),
+                    ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.timestamp), convo->contact.c_str());
+            }
         }
     }
 
@@ -3020,6 +3066,30 @@ static void RenderContactList(float width) {
             g_PendingDeleteContact.clear();
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndPopup();
+    }
+
+    if (g_NoteEditOpen) {
+        ImGui::OpenPopup("Edit Note##NoteEdit");
+        g_NoteEditOpen = false;
+    }
+    if (ImGui::BeginPopupModal("Edit Note##NoteEdit", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(g_ActiveTheme.sender_other, "%s", g_NoteEditContact.c_str());
+        ImGui::SetNextItemWidth(320.0f);
+        ImGui::InputTextMultiline("##notetext", g_NoteEditBuf, sizeof(g_NoteEditBuf),
+            ImVec2(320, 80));
+        ImGui::Spacing();
+        if (ImGui::Button("Save", ImVec2(100, 0))) {
+            if (g_NoteEditBuf[0])
+                g_ContactNotes[g_NoteEditContact] = g_NoteEditBuf;
+            else
+                g_ContactNotes.erase(g_NoteEditContact);
+            SaveSettings();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0)))
+            ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
