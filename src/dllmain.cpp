@@ -15,6 +15,7 @@
 #include <mutex>
 #include <atomic>
 #include <cwchar>
+#include <unordered_map>
 #include "../include/nexus/Nexus.h"
 #include "../include/mumble/Mumble.h"
 #include "ChatManager.h"
@@ -708,6 +709,8 @@ static std::string g_PendingDeleteContact;
 static bool g_ContextMenuContactPinned = false;
 static std::vector<std::string> g_PinnedContactNames;
 static std::string g_ClipboardMsg;
+static uint64_t g_SessionStartMs = 0;
+static std::unordered_map<uint64_t, double> g_MessageArrivalTimes;
 static double g_ClipboardMsgExpiry = 0.0;
 static std::atomic<bool> g_ScrollToBottom{false};
 static std::string g_DataDir;
@@ -1553,6 +1556,11 @@ static void RenderContactList(float width) {
             g_SelectedContact = convo->contact;
             g_ScrollToBottom = true;
             g_FocusInput = true;
+            double now = ImGui::GetTime();
+            for (auto it = g_MessageArrivalTimes.begin(); it != g_MessageArrivalTimes.end(); ) {
+                if (now - it->second > 2.0) it = g_MessageArrivalTimes.erase(it);
+                else ++it;
+            }
         }
 
         // Right-click context menu
@@ -1831,9 +1839,22 @@ static void RenderMessageArea() {
         // Static buffer for InvisibleButton IDs (avoid per-message heap allocation)
         char bubbleIdBuf[32];
 
+        auto applyAlpha = [](ImU32 col, float a) -> ImU32 {
+            ImU32 origA = (col >> 24) & 0xFF;
+            return (col & 0x00FFFFFF) | ((ImU32)(origA * a) << 24);
+        };
+
         for (size_t mi = 0; mi < convo->messages.size() && mi < g_BubbleCache.layouts.size(); mi++) {
             const auto& msg = convo->messages[mi];
             const auto& layout = g_BubbleCache.layouts[mi];
+
+            float msgAlpha = 1.0f;
+            if (msg.epoch_ms >= g_SessionStartMs && g_SessionStartMs > 0) {
+                double& arrivalTime = g_MessageArrivalTimes[msg.epoch_ms];
+                if (arrivalTime == 0.0) arrivalTime = ImGui::GetTime();
+                float elapsed = (float)(ImGui::GetTime() - arrivalTime);
+                msgAlpha = std::min(1.0f, elapsed / 0.15f);
+            }
 
             // System/error messages — centered, distinct style
             if (layout.isSystem) {
@@ -1859,7 +1880,7 @@ static void RenderMessageArea() {
             float bubbleX = is_self ? (cursor.x + areaWidth - layout.bubbleW - 8) : (cursor.x + 8);
 
             // Draw bubble
-            ImU32 bubbleCol = is_self ? COLOR_BUBBLE_SELF : COLOR_BUBBLE_OTHER;
+            ImU32 bubbleCol = applyAlpha(is_self ? COLOR_BUBBLE_SELF : COLOR_BUBBLE_OTHER, msgAlpha);
             dl->AddRectFilled(
                 ImVec2(bubbleX, cursor.y),
                 ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
@@ -1870,31 +1891,34 @@ static void RenderMessageArea() {
                 dl->AddRect(
                     ImVec2(bubbleX, cursor.y),
                     ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
-                    IM_COL32(220, 40, 40, 255), bubbleRound, 0, 2.0f);
+                    applyAlpha(IM_COL32(220, 40, 40, 255), msgAlpha), bubbleRound, 0, 2.0f);
                 const char* failIcon = "!";
                 ImVec2 failSize = font->CalcTextSizeA(fs * 1.2f, FLT_MAX, 0.0f, failIcon);
                 float failX = bubbleX - failSize.x - 6;
                 float failY = cursor.y + (layout.bubbleH - failSize.y) * 0.5f;
                 dl->AddText(font, fs * 1.2f, ImVec2(failX, failY),
-                    IM_COL32(220, 40, 40, 255), failIcon);
+                    applyAlpha(IM_COL32(220, 40, 40, 255), msgAlpha), failIcon);
             }
 
             // Sender name (left of bubble)
             ImVec4 nameCol = is_self ? COLOR_SELF : COLOR_OTHER;
+            nameCol.w *= msgAlpha;
             dl->AddText(font, fs, ImVec2(bubbleX + padding, cursor.y + padding),
                 ImGui::ColorConvertFloat4ToU32(nameCol), layout.senderLabel.c_str());
 
             // Timestamp (right of name line, slightly smaller)
             float timeFs = font->FontSize * (g_FontScale * 0.85f);
+            ImVec4 tsCol = COLOR_TIMESTAMP;
+            tsCol.w *= msgAlpha;
             dl->AddText(font, timeFs,
                 ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
-                ImGui::ColorConvertFloat4ToU32(COLOR_TIMESTAMP), msg.timestamp.c_str());
+                ImGui::ColorConvertFloat4ToU32(tsCol), msg.timestamp.c_str());
 
             // Message text (wrapped)
             float textY = cursor.y + padding + layout.nameSize.y + 4;
             font->RenderText(dl, fs,
                 ImVec2(bubbleX + padding, textY),
-                IM_COL32(220, 220, 220, 255),
+                applyAlpha(IM_COL32(220, 220, 220, 255), msgAlpha),
                 ImVec4(bubbleX + padding, textY, bubbleX + layout.bubbleW - padding, textY + layout.msgSize.y + 10),
                 msg.text.c_str(), msg.text.c_str() + msg.text.size(), layout.textWrapWidth);
 
@@ -2197,6 +2221,7 @@ void AddonLoad(AddonAPI_t* aApi) {
 
     // Load settings first (icon position, sound prefs, etc.)
     LoadSettings();
+    g_SessionStartMs = NowEpochMs();
     ScanSoundFiles();
 
     // Initialize subsystems
@@ -2261,6 +2286,7 @@ void AddonUnload() {
     // Shutdown subsystems
     TyrianIM::WhisperHook::Shutdown();
     TyrianIM::ChatManager::Shutdown();
+    g_MessageArrivalTimes.clear();
 
     APIDefs->Log(LOGL_INFO, "TyrianIM", "Tyrian Instant Messaging unloaded");
     APIDefs = nullptr;
