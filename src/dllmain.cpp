@@ -1838,12 +1838,215 @@ static TyrianTheme BuildNexusTheme() {
     return t;
 }
 
+// ── Sylvari Grove draw hooks ──────────────────────────────────────────────────
+
+static void SylvariVines(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float alpha) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    // Gently sway vine tips using a slow sine
+    float sway = sinf((float)ImGui::GetTime() * 0.4f) * 6.0f;
+    ImU32 vine  = IM_COL32(40, 160,  80, (int)(38 * alpha));
+    ImU32 vine2 = IM_COL32(60, 200, 100, (int)(28 * alpha));
+    ImU32 dot   = IM_COL32(80, 255, 140, (int)(90 * alpha));
+
+    // Bottom-left: two branching vines rising from the corner
+    ImVec2 bl(mn.x, mx.y);
+    dl->AddBezierCubic(bl,
+        ImVec2(mn.x + w*0.04f, mx.y - h*0.18f),
+        ImVec2(mn.x + w*0.10f, mx.y - h*0.36f),
+        ImVec2(mn.x + w*0.14f + sway, mx.y - h*0.52f),
+        vine, 1.2f);
+    // Branch
+    dl->AddBezierCubic(
+        ImVec2(mn.x + w*0.08f, mx.y - h*0.28f),
+        ImVec2(mn.x + w*0.18f, mx.y - h*0.32f),
+        ImVec2(mn.x + w*0.22f, mx.y - h*0.40f),
+        ImVec2(mn.x + w*0.20f + sway*0.7f, mx.y - h*0.48f),
+        vine2, 0.8f);
+    // Leaf dot at tip
+    dl->AddCircleFilled(ImVec2(mn.x + w*0.14f + sway, mx.y - h*0.52f), 2.8f, dot);
+    dl->AddCircleFilled(ImVec2(mn.x + w*0.20f + sway*0.7f, mx.y - h*0.48f), 2.0f, dot);
+
+    // Top-right: hanging vines descending
+    float sway2 = sinf((float)ImGui::GetTime() * 0.3f + 1.2f) * 5.0f;
+    ImVec2 tr(mx.x, mn.y);
+    dl->AddBezierCubic(tr,
+        ImVec2(mx.x - w*0.04f, mn.y + h*0.14f),
+        ImVec2(mx.x - w*0.12f, mn.y + h*0.28f),
+        ImVec2(mx.x - w*0.16f + sway2, mn.y + h*0.42f),
+        vine, 1.2f);
+    dl->AddBezierCubic(
+        ImVec2(mx.x - w*0.07f, mn.y + h*0.20f),
+        ImVec2(mx.x - w*0.20f, mn.y + h*0.22f),
+        ImVec2(mx.x - w*0.26f, mn.y + h*0.30f),
+        ImVec2(mx.x - w*0.24f + sway2*0.6f, mn.y + h*0.38f),
+        vine2, 0.8f);
+    dl->AddCircleFilled(ImVec2(mx.x - w*0.16f + sway2, mn.y + h*0.42f), 2.8f, dot);
+    dl->AddCircleFilled(ImVec2(mx.x - w*0.24f + sway2*0.6f, mn.y + h*0.38f), 2.0f, dot);
+}
+
+static void SylvariParticles(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi   = i * 0.6180339f;                          // golden ratio spacing
+        float speed = 12.0f + phi * 22.0f;                     // varied drift speed
+        float drift = sinf(t * 0.5f + phi * 4.0f) * 8.0f;     // gentle horizontal sway
+        float px = mn.x + fmodf(phi * w * 2.3f + drift, w);
+        float py = mx.y - fmodf(t * speed + phi * h, h);       // wrap top to bottom
+        float pulse = 0.45f + 0.55f * sinf(t * 1.8f + phi * 6.28f);
+        float radius = 1.0f + pulse * 1.4f;
+        int   a      = (int)(18 + pulse * 52);
+        // Alternate green and cyan-green particles
+        ImU32 col = (i % 3 == 0)
+            ? IM_COL32(60, 255, 160, a)
+            : (i % 3 == 1) ? IM_COL32(100, 220, 255, a)
+                           : IM_COL32(40, 200, 100, a);
+        dl->AddCircleFilled(ImVec2(px, py), radius, col);
+        // Occasional larger glow bloom
+        if (i % 5 == 0 && pulse > 0.75f)
+            dl->AddCircleFilled(ImVec2(px, py), radius * 2.8f,
+                IM_COL32(60, 220, 140, (int)(a * 0.25f)));
+    }
+}
+
+static void SylvariGroveDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+
+    // Ground mist: faint green gradient rising from the bottom
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.30f), mx,
+        IM_COL32(0,0,0,0), IM_COL32(0,0,0,0),
+        IM_COL32(10, 50, 20, 40), IM_COL32(10, 50, 20, 40));
+
+    // Bioluminescent particles
+    SylvariParticles(dl, mn, mx, 22);
+
+    // Swaying vines
+    SylvariVines(dl, mn, mx, 1.0f);
+
+    // Soft top vignette (canopy shadow)
+    dl->AddRectFilledMultiColor(
+        mn, ImVec2(mx.x, mn.y + h * 0.08f),
+        IM_COL32(2,12,5,80), IM_COL32(2,12,5,80),
+        IM_COL32(0,0,0,0),   IM_COL32(0,0,0,0));
+}
+
+static void SylvariGroveDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    SylvariParticles(dl, mn, mx, 10);
+    SylvariVines(dl, mn, mx, 0.7f);
+}
+
+static TyrianTheme BuildSylvariGroveTheme() {
+    TyrianTheme t;
+    t.name        = "Sylvari Grove";
+    t.description = "Bioluminescent forest — rising particles, swaying vines, organic shapes";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.03f, 0.06f, 0.04f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.03f, 0.06f, 0.03f, 0.82f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.04f, 0.08f, 0.05f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.15f, 0.55f, 0.28f, 0.40f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.06f, 0.18f, 0.09f, 0.65f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.08f, 0.26f, 0.13f, 0.75f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.10f, 0.36f, 0.18f, 0.85f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.03f, 0.08f, 0.04f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.06f, 0.20f, 0.10f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.03f, 0.07f, 0.04f, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.04f, 0.09f, 0.05f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.02f, 0.05f, 0.03f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.15f, 0.55f, 0.28f, 0.70f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.20f, 0.72f, 0.38f, 0.85f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.25f, 0.88f, 0.46f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.25f, 0.92f, 0.50f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.20f, 0.72f, 0.38f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.28f, 0.92f, 0.52f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.08f, 0.26f, 0.13f, 0.75f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.12f, 0.40f, 0.20f, 0.85f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.16f, 0.55f, 0.28f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.10f, 0.32f, 0.16f, 0.65f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.14f, 0.46f, 0.23f, 0.75f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.18f, 0.60f, 0.30f, 0.85f);
+    c[ImGuiCol_Separator]            = ImVec4(0.12f, 0.42f, 0.20f, 0.40f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.18f, 0.60f, 0.30f, 0.60f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.25f, 0.88f, 0.46f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.15f, 0.50f, 0.24f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.20f, 0.68f, 0.34f, 0.60f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.25f, 0.88f, 0.46f, 0.90f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.04f, 0.14f, 0.07f, 0.86f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.12f, 0.40f, 0.20f, 0.90f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.09f, 0.30f, 0.15f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.03f, 0.08f, 0.04f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.06f, 0.18f, 0.09f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.80f, 0.95f, 0.84f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.28f, 0.52f, 0.35f, 1.00f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.25f, 0.88f, 0.46f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.25f, 0.88f, 0.46f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.35f, 1.00f, 0.58f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.04f, 0.14f, 0.07f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.14f, 0.46f, 0.22f, 0.60f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.09f, 0.30f, 0.15f, 0.40f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.04f, 0.02f, 0.65f);
+
+    // Organic rounding — soft living shapes
+    s.WindowRounding    = 8.0f;
+    s.ChildRounding     = 6.0f;
+    s.FrameRounding     = 6.0f;
+    s.PopupRounding     = 8.0f;
+    s.ScrollbarRounding = 8.0f;
+    s.GrabRounding      = 6.0f;
+    s.TabRounding       = 6.0f;
+
+    // Chat colors — deep forest palette
+    t.bubble_self     = IM_COL32( 15,  65,  30, 225);
+    t.bubble_self_top = IM_COL32( 20,  82,  38, 230);
+    t.bubble_self_bot = IM_COL32(  8,  42,  18, 240);
+    t.bubble_other    = IM_COL32( 18,  35,  22, 215);
+    t.bubble_other_top= IM_COL32( 22,  44,  26, 220);
+    t.bubble_other_bot= IM_COL32( 10,  22,  14, 235);
+    t.bubble_rounding = 14.0f;
+
+    t.header_bg    = IM_COL32(  5,  16,   8, 245);
+    t.active_bg    = IM_COL32( 18,  70,  32, 185);
+    t.input_bg     = IM_COL32(  8,  22,  12, 230);
+    t.avatar_bg    = IM_COL32( 30, 180,  80, 255);
+    t.unread_dot   = IM_COL32(220,  40,  40, 255);
+    t.pin_accent   = IM_COL32( 55, 230, 110, 255);
+
+    t.sender_self   = ImVec4(0.28f, 0.96f, 0.54f, 1.0f);
+    t.sender_other  = ImVec4(0.62f, 0.88f, 0.68f, 1.0f);
+    t.timestamp     = ImVec4(0.28f, 0.50f, 0.34f, 1.0f);
+    t.unread_label  = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+    t.status_ok     = ImVec4(0.28f, 0.96f, 0.54f, 1.0f);
+    t.status_warn   = ImVec4(0.90f, 0.82f, 0.10f, 1.0f);
+    t.status_err    = ImVec4(1.00f, 0.35f, 0.30f, 1.0f);
+
+    // Rising ground mist
+    t.chat_bg_top = IM_COL32(0, 0, 0, 0);
+    t.chat_bg_bot = IM_COL32(8, 35, 14, 30);
+
+    // Slow, breathing animation — like a living forest
+    t.bob_amplitude   = 3.5f;
+    t.bob_period_ms   = 3200.0f;
+    t.flash_period_ms = 1600.0f;
+    t.fade_ms         = 280.0f;
+
+    t.draw_chat_bg     = SylvariGroveDrawChatBg;
+    t.draw_contacts_bg = SylvariGroveDrawContactsBg;
+
+    return t;
+}
+
 using ThemeBuilder = TyrianTheme(*)();
 static const ThemeBuilder kBuiltinThemes[] = {
     BuildNexusTheme,
     BuildGW2DarkTheme,
     BuildCharrSteelTheme,
     BuildAsuranLabTheme,
+    BuildSylvariGroveTheme,
 };
 
 static void ScanThemes() {
