@@ -743,6 +743,7 @@ struct BubbleLayout {
     ImVec2 nameSize, timeSize, msgSize;
     float textWrapWidth;
     std::string senderLabel;
+    std::string displayTimestamp;
     bool isSystem;
     // For system messages
     float sysW, sysH;
@@ -764,6 +765,9 @@ static void InvalidateBubbleCache() {
     g_BubbleCache.messageCount = 0;
     g_LayoutQueue.clear();
 }
+
+// Forward declaration
+static std::string FormatDisplayTime(uint64_t epoch_ms);
 
 // Compute layout for a single message at index i in the conversation
 static void ComputeBubbleLayout(const TyrianIM::Conversation* convo, size_t i,
@@ -791,8 +795,9 @@ static void ComputeBubbleLayout(const TyrianIM::Conversation* convo, size_t i,
         : (!convo->display_name.empty() ? convo->display_name : msg.sender);
 
     layout.nameSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, layout.senderLabel.c_str());
+    layout.displayTimestamp = FormatDisplayTime(msg.epoch_ms);
     float timeFs = font->FontSize * (fontScale * 0.85f);
-    layout.timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, msg.timestamp.c_str());
+    layout.timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, layout.displayTimestamp.c_str());
     layout.textWrapWidth = maxBubbleWidth - padding * 2;
     layout.msgSize = font->CalcTextSizeA(fs, FLT_MAX, layout.textWrapWidth, msg.text.c_str());
 
@@ -1053,6 +1058,29 @@ static std::string FormatTime(uint64_t epoch_ms) {
     localtime_s(&tm_info, &t);
     char buf[16];
     strftime(buf, sizeof(buf), "%H:%M", &tm_info);
+    return std::string(buf);
+}
+
+// Returns "HH:MM" for today's messages, "Weekday, DD Mon YY @ HH:MM" for older ones
+static std::string FormatDisplayTime(uint64_t epoch_ms) {
+    time_t t = static_cast<time_t>(epoch_ms / 1000);
+    struct tm msg_tm;
+    localtime_s(&msg_tm, &t);
+
+    time_t now_t = time(nullptr);
+    struct tm now_tm;
+    localtime_s(&now_tm, &now_t);
+
+    bool sameDay = (msg_tm.tm_year == now_tm.tm_year &&
+                    msg_tm.tm_yday == now_tm.tm_yday);
+    if (sameDay) {
+        char buf[8];
+        strftime(buf, sizeof(buf), "%H:%M", &msg_tm);
+        return std::string(buf);
+    }
+
+    char buf[40];
+    strftime(buf, sizeof(buf), "%A, %d %b %y @ %H:%M", &msg_tm);
     return std::string(buf);
 }
 
@@ -1893,7 +1921,7 @@ static void RenderMessageArea() {
             tsCol.w *= msgAlpha;
             dl->AddText(font, timeFs,
                 ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
-                ImGui::ColorConvertFloat4ToU32(tsCol), msg.timestamp.c_str());
+                ImGui::ColorConvertFloat4ToU32(tsCol), layout.displayTimestamp.c_str());
 
             // Message text (wrapped)
             float textY = cursor.y + padding + layout.nameSize.y + 4;
