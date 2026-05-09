@@ -1615,7 +1615,7 @@ static void RenderContactList(float width) {
             const char* pinLabel = "[P]";
             float pinFs = fs * 0.72f;
             ImVec2 pinSize = font->CalcTextSizeA(pinFs, FLT_MAX, 0.0f, pinLabel);
-            float pinX = cursor.x + (width - 16.0f) - 4.0f - pinSize.x;
+            float pinX = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x - 4.0f - pinSize.x;
             float pinY = cursor.y + (itemHeight - pinSize.y) * 0.5f;
             dl->AddText(font, pinFs, ImVec2(pinX, pinY),
                 IM_COL32(212, 175, 55, 220), pinLabel);
