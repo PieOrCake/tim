@@ -1501,7 +1501,17 @@ static void RenderContactList(float width) {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
+    bool separatorDrawn = false;
+    bool firstItemIsPinned = !conversations.empty() && conversations[0]->pinned;
+
     for (const auto* convo : conversations) {
+        if (firstItemIsPinned && !separatorDrawn && !convo->pinned) {
+            separatorDrawn = true;
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+        }
+
         bool is_selected = (g_SelectedContact == convo->contact);
 
         ImVec2 cursor = ImGui::GetCursorScreenPos();
@@ -1598,6 +1608,16 @@ static void RenderContactList(float width) {
             dl->AddText(font, badgeFs,
                 ImVec2(badgeCenter.x - countSize.x * 0.5f, badgeCenter.y - countSize.y * 0.5f),
                 IM_COL32(255, 255, 255, 255), unreadBuf);
+        }
+
+        if (convo->pinned) {
+            const char* pinLabel = "[P]";
+            float pinFs = fs * 0.72f;
+            ImVec2 pinSize = font->CalcTextSizeA(pinFs, FLT_MAX, 0.0f, pinLabel);
+            float pinX = cursor.x + (width - 16.0f) - 4.0f - pinSize.x;
+            float pinY = cursor.y + (itemHeight - pinSize.y) * 0.5f;
+            dl->AddText(font, pinFs, ImVec2(pinX, pinY),
+                IM_COL32(212, 175, 55, 220), pinLabel);
         }
 
         // Subtitle
