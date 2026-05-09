@@ -1390,7 +1390,7 @@ static void RenderFloatingIcon() {
     }
 
     if (!g_FloatingIconPosInitialized) {
-        ImGui::SetNextWindowPos(ImVec2(g_FloatingIconX, g_FloatingIconY), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(g_FloatingIconX, g_FloatingIconY + bobOffset), ImGuiCond_FirstUseEver);
         g_FloatingIconPosInitialized = true;
     }
 
@@ -1413,8 +1413,8 @@ static void RenderFloatingIcon() {
         g_FloatIconTexture = APIDefs->Textures_Get(TEX_FLOAT_ICON);
 
     // Image bounds — small margin inside the window
-    float bx0 = wp.x + 4.0f * s, by0 = wp.y + 4.0f * s + bobOffset;
-    float bx1 = wp.x + 56.0f * s, by1 = wp.y + 56.0f * s + bobOffset;
+    float bx0 = wp.x + 4.0f * s, by0 = wp.y + 4.0f * s;
+    float bx1 = wp.x + 56.0f * s, by1 = wp.y + 56.0f * s;
 
     if (g_FloatIconTexture && g_FloatIconTexture->Resource) {
         dl->AddImage((ImTextureID)g_FloatIconTexture->Resource,
@@ -1856,7 +1856,8 @@ static void RenderMessageArea() {
 
             float msgAlpha = 1.0f;
             if (msg.epoch_ms >= g_SessionStartMs && g_SessionStartMs > 0) {
-                double& arrivalTime = g_MessageArrivalTimes[msg.epoch_ms];
+                uint64_t mapKey = msg.epoch_ms ^ ((uint64_t)mi << 32);
+                double& arrivalTime = g_MessageArrivalTimes[mapKey];
                 if (arrivalTime == 0.0) arrivalTime = ImGui::GetTime();
                 float elapsed = (float)(ImGui::GetTime() - arrivalTime);
                 msgAlpha = std::min(1.0f, elapsed / 0.15f);
