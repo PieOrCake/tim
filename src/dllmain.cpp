@@ -19,8 +19,11 @@
 #include "../include/nexus/Nexus.h"
 #include "../include/mumble/Mumble.h"
 #include "../lib/toml.hpp"
+#include <nlohmann/json.hpp>
 #include "ChatManager.h"
 #include "WhisperHook.h"
+#include "ChatLinks.h"
+#include "GW2API.h"
 
 // Version constants
 #define V_MAJOR 0
@@ -547,7 +550,10 @@ static uint64_t g_SessionStartMs = 0;
 static std::unordered_map<uint64_t, double> g_MessageArrivalTimes;
 static double g_ClipboardMsgExpiry = 0.0;
 static std::atomic<bool> g_ScrollToBottom{false};
+static std::atomic<bool> g_LinksDirty{false};
 static std::string g_DataDir;
+
+// AE2 build import popup state
 
 // Floating icon state
 static bool g_ShowFloatingIcon = true;
@@ -570,8 +576,36 @@ static bool g_FocusInput = false;
 static int g_SendDelay = 50;  // ms between keystrokes
 static std::atomic<bool> g_IsSending{false};
 static std::string g_ActiveThemeName = "Nexus";
+static std::unordered_map<std::string, std::string> g_Drafts;
+
+// Called from GW2API worker thread when any link resolves.
+void TIM_NotifyLinkResolved() { g_LinksDirty = true; }
+
+// Write an AE2 build into Alter Ego's build_library.json.
+// Returns error string on failure, empty string on success.
+
+// Request API resolution for all pending links in a conversation.
+static void RequestConversationLinks(const TyrianIM::Conversation* convo) {
+    if (!convo) return;
+    for (size_t mi = 0; mi < convo->messages.size(); mi++) {
+        const auto& msg = convo->messages[mi];
+        if (!msg.has_links) continue;
+        for (size_t si = 0; si < msg.segments.size(); si++) {
+            const auto& seg = msg.segments[si];
+            if (seg.is_link && seg.link.state == TyrianIM::LinkState::Pending)
+                TyrianIM::GW2API::RequestLink(convo->contact, mi, si, seg.link);
+        }
+    }
+}
 
 // --- Bubble layout cache (amortized recomputation) ---
+struct SegLayout {
+    ImVec2 pos;        // relative to message text origin (bubbleX+padding, textY)
+    ImVec2 size;
+    bool   is_link;
+    int    segment_idx;
+};
+
 struct BubbleLayout {
     float bubbleW, bubbleH;
     ImVec2 nameSize, timeSize, msgSize;
@@ -581,6 +615,8 @@ struct BubbleLayout {
     bool isSystem;
     // For system messages
     float sysW, sysH;
+    // For messages with inline links
+    std::vector<SegLayout> seg_layouts; // populated when msg.has_links
 };
 
 struct LayoutCache {
@@ -633,7 +669,52 @@ static void ComputeBubbleLayout(const TyrianIM::Conversation* convo, size_t i,
     float timeFs = font->FontSize * (fontScale * 0.85f);
     layout.timeSize = font->CalcTextSizeA(timeFs, FLT_MAX, 0.0f, layout.displayTimestamp.c_str());
     layout.textWrapWidth = maxBubbleWidth - padding * 2;
-    layout.msgSize = font->CalcTextSizeA(fs, FLT_MAX, layout.textWrapWidth, msg.text.c_str());
+
+    layout.seg_layouts.clear();
+
+    if (!msg.has_links) {
+        // Fast path: single text block, unchanged behaviour
+        layout.msgSize = font->CalcTextSizeA(fs, FLT_MAX, layout.textWrapWidth, msg.text.c_str());
+    } else {
+        // Segmented layout: plain text blocks stack to new lines; links flow inline with each other.
+        float cursor_x = 0.0f, cursor_y = 0.0f;
+        float line_h   = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, "Mg").y;
+        float max_x    = 0.0f;
+
+        for (int si = 0; si < (int)msg.segments.size(); si++) {
+            const auto& seg = msg.segments[si];
+            SegLayout sl{};
+            sl.segment_idx = si;
+
+            if (!seg.is_link) {
+                // Plain text: always starts at x=0 on a new line if cursor_x > 0
+                if (cursor_x > 0.0f) { cursor_y += line_h; cursor_x = 0.0f; }
+                ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, layout.textWrapWidth, seg.text.c_str());
+                sl.is_link = false;
+                sl.pos  = ImVec2(0.0f, cursor_y);
+                sl.size = sz;
+                cursor_y += sz.y;
+                cursor_x  = 0.0f;
+                max_x = (std::max)(max_x, sz.x);
+            } else {
+                // Link: flows inline; wrap if it doesn't fit on the current line
+                const std::string& label = seg.link.display;
+                ImVec2 sz = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, label.c_str());
+                if (cursor_x > 0.0f && cursor_x + sz.x > layout.textWrapWidth) {
+                    cursor_y += line_h; cursor_x = 0.0f;
+                }
+                sl.is_link = true;
+                sl.pos  = ImVec2(cursor_x, cursor_y);
+                sl.size = ImVec2(sz.x, line_h);
+                cursor_x += sz.x + 4.0f; // small gap between consecutive links
+                max_x = (std::max)(max_x, sl.pos.x + sl.size.x);
+            }
+            layout.seg_layouts.push_back(sl);
+        }
+        // Total message body size
+        float total_h = cursor_y + (cursor_x > 0.0f ? line_h : 0.0f);
+        layout.msgSize = ImVec2(max_x, total_h);
+    }
 
     layout.bubbleW = (std::max)(layout.nameSize.x + layout.timeSize.x + 20, layout.msgSize.x) + padding * 2;
     if (layout.bubbleW > maxBubbleWidth) layout.bubbleW = maxBubbleWidth;
@@ -723,6 +804,17 @@ static LPARAM GetKeyLParam(uint32_t vk, bool down) {
     lp = lp << 16;
     lp += 1;
     return (LPARAM)lp;
+}
+
+// Strip GW2 chat link escaping: \[ → [ and \] → ] so pasted codes work in-game
+static std::string NormalizeGW2Text(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\' && i + 1 < s.size() && (s[i+1] == '[' || s[i+1] == ']')) continue;
+        out += s[i];
+    }
+    return out;
 }
 
 // Copy wide string to clipboard
@@ -820,16 +912,12 @@ static void SendWhisperViaChatbox(const std::string& recipient, const std::strin
         // Step 4: Paste message
         pasteClipboard(wmsg);
 
-        // Step 5: Send with Enter
+        // Step 5: Send with Enter, then unconditionally send Escape to ensure chatbox closes
         sendToGame(hwnd, WM_KEYDOWN, VK_RETURN, GetKeyLParam(VK_RETURN, true));
         sendToGame(hwnd, WM_KEYUP, VK_RETURN, GetKeyLParam(VK_RETURN, false));
-
-        // Enter closes the chatbox, but send Escape if it's still open (gives MumbleLink time to update)
         std::this_thread::sleep_for(std::chrono::milliseconds(delay * 3));
-        if (g_MumbleLink && g_MumbleLink->Context.IsTextboxFocused) {
-            sendToGame(hwnd, WM_KEYDOWN, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, true));
-            sendToGame(hwnd, WM_KEYUP, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, false));
-        }
+        sendToGame(hwnd, WM_KEYDOWN, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, true));
+        sendToGame(hwnd, WM_KEYUP, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, false));
 
         g_IsSending = false;
     }).detach();
@@ -857,6 +945,7 @@ struct TyrianTheme {
     ImU32  header_bg    = IM_COL32(35,  35,  45, 220);
     ImU32  active_bg    = IM_COL32(50,  80, 120, 180);
     ImU32  input_bg     = IM_COL32(30,  30,  38, 220);
+    ImU32  input_border = IM_COL32(0,   0,   0,   0);  // 0 alpha = no border
     ImU32  avatar_bg    = IM_COL32(60, 130, 180, 255);
     ImU32  unread_dot   = IM_COL32(255, 80,  80, 255);
     ImU32  pin_accent   = IM_COL32(180, 150, 60, 255);
@@ -1257,6 +1346,32 @@ static ImGuiStyle BuildGW2Theme() {
     return style;
 }
 
+// ── GW2 Dark draw hook ────────────────────────────────────────────────────────
+
+static void GW2DarkDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    // Subtle diagonal crosshatch — textures the solid background without animation
+    const ImU32 col    = IM_COL32(180, 140, 50, 18);  // very faint gold
+    const float step   = 22.0f;                        // spacing between lines
+    const float w      = mx.x - mn.x;
+    const float h      = mx.y - mn.y;
+    const float extent = w + h;                        // far enough to cross the full panel
+
+    dl->PushClipRect(mn, mx, true);
+
+    // SW→NE diagonals
+    for (float off = -h; off < w; off += step) {
+        dl->AddLine({mn.x + off,        mx.y},
+                    {mn.x + off + extent, mn.y}, col, 1.0f);
+    }
+    // NW→SE diagonals
+    for (float off = -h; off < w; off += step) {
+        dl->AddLine({mn.x + off,         mn.y},
+                    {mn.x + off + extent, mx.y}, col, 1.0f);
+    }
+
+    dl->PopClipRect();
+}
+
 static TyrianTheme BuildGW2DarkTheme() {
     TyrianTheme theme;
     theme.name        = "GW2 Dark";
@@ -1275,7 +1390,88 @@ static TyrianTheme BuildGW2DarkTheme() {
     theme.bubble_self_top = theme.bubble_self_bot = theme.bubble_self;
     theme.bubble_other_top = theme.bubble_other_bot = theme.bubble_other;
     theme.bubble_rounding = 10.0f;
+    theme.input_bg      = IM_COL32( 38,  30,  12, 230);
+    theme.input_border  = IM_COL32(180, 140,  50, 130);
+    theme.draw_chat_bg  = GW2DarkDrawChatBg;
     return theme;
+}
+
+// ── Charr Steel draw hooks ────────────────────────────────────────────────────
+
+static void CharrSteelEmbers(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi   = i * 0.6180339f;
+        float speed = 20.0f + phi * 38.0f;
+        float drift = sinf(t * 0.6f + phi * 8.0f) * 10.0f;
+        float px    = mn.x + fmodf(phi * w * 1.7f + drift, w);
+        // Rise from bottom, wrap back to bottom
+        float py    = mx.y - fmodf(t * speed + phi * h, h);
+        float pulse = 0.5f + 0.5f * sinf(t * 2.4f + phi * 6.28f);
+        float r     = 0.5f + pulse * 1.2f;
+        int   a     = (int)(20 + pulse * 55);
+        // Mix of orange, red, and bright yellow-white hot embers
+        ImU32 col = (i % 3 == 0)
+            ? IM_COL32(255, 120,  20, a)
+            : (i % 3 == 1) ? IM_COL32(220,  50,  10, a)
+                           : IM_COL32(255, 200,  60, a);
+        dl->AddCircleFilled(ImVec2(px, py), r, col);
+        // Occasional glow bloom on the brightest embers
+        if (i % 4 == 0 && pulse > 0.80f)
+            dl->AddCircleFilled(ImVec2(px, py), r * 3.0f,
+                IM_COL32(255, 100, 20, (int)(a * 0.20f)));
+    }
+}
+
+static void CharrSteelClawMarks(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float alpha) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    // Slow pulse — like the marks are still glowing with heat
+    float heat = 0.40f + 0.60f * sinf(t * 0.18f);
+    int   a    = (int)(12 * alpha * heat);
+    ImU32 col  = IM_COL32(180, 30, 10, a);
+
+    // Three parallel diagonal slashes — upper-left cluster
+    struct Slash { float x0, y0, x1, y1; };
+    const Slash slashes[] = {
+        { 0.05f, 0.08f,  0.22f, 0.62f },
+        { 0.09f, 0.06f,  0.26f, 0.60f },
+        { 0.13f, 0.04f,  0.30f, 0.58f },
+        // A second set — lower-right, going the other direction
+        { 0.72f, 0.38f,  0.90f, 0.85f },
+        { 0.76f, 0.36f,  0.94f, 0.82f },
+        { 0.80f, 0.34f,  0.98f, 0.80f },
+    };
+    for (auto& s : slashes) {
+        dl->AddLine(
+            ImVec2(mn.x + w * s.x0, mn.y + h * s.y0),
+            ImVec2(mn.x + w * s.x1, mn.y + h * s.y1),
+            col, 1.0f);
+    }
+}
+
+static void CharrSteelDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    // Forge heat rising from the floor
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.30f), mx,
+        IM_COL32(0,0,0,0), IM_COL32(0,0,0,0),
+        IM_COL32(70, 8, 2, 35), IM_COL32(70, 8, 2, 35));
+
+    CharrSteelClawMarks(dl, mn, mx, 1.0f);
+    CharrSteelEmbers(dl, mn, mx, 20);
+
+    // Dark top vignette — oppressive ceiling
+    dl->AddRectFilledMultiColor(
+        mn, ImVec2(mx.x, mn.y + h * 0.07f),
+        IM_COL32(8, 2, 2, 70), IM_COL32(8, 2, 2, 70),
+        IM_COL32(0,0,0,0),     IM_COL32(0,0,0,0));
+}
+
+static void CharrSteelDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    CharrSteelClawMarks(dl, mn, mx, 0.7f);
+    CharrSteelEmbers(dl, mn, mx, 9);
 }
 
 static TyrianTheme BuildCharrSteelTheme() {
@@ -1345,7 +1541,8 @@ static TyrianTheme BuildCharrSteelTheme() {
 
     t.header_bg     = IM_COL32( 22,  16,  15, 245);
     t.active_bg     = IM_COL32( 72,  16,  12, 185);
-    t.input_bg      = IM_COL32( 18,  13,  12, 225);
+    t.input_bg      = IM_COL32( 28,  18,  16, 230);
+    t.input_border  = IM_COL32(160,  28,  18, 160);
     t.avatar_bg     = IM_COL32(165,  28,  20, 255);
     t.unread_dot    = IM_COL32(220,  40,  28, 255);
     t.pin_accent    = IM_COL32(195,  32,  22, 255);
@@ -1370,6 +1567,9 @@ static TyrianTheme BuildCharrSteelTheme() {
     t.status_ok     = ImVec4(0.40f, 0.85f, 0.30f, 1.00f);
     t.status_warn   = ImVec4(1.00f, 0.72f, 0.08f, 1.00f);
     t.status_err    = ImVec4(1.00f, 0.30f, 0.25f, 1.00f);
+
+    t.draw_chat_bg     = CharrSteelDrawChatBg;
+    t.draw_contacts_bg = CharrSteelDrawContactsBg;
 
     return t;
 }
@@ -1607,6 +1807,7 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
             readU32("header_bg",    t.header_bg);
             readU32("active_bg",    t.active_bg);
             readU32("input_bg",     t.input_bg);
+            readU32("input_border", t.input_border);
             readU32("avatar_bg",    t.avatar_bg);
             readU32("unread_dot",   t.unread_dot);
             readU32("pin_accent",   t.pin_accent);
@@ -1796,7 +1997,8 @@ static TyrianTheme BuildAsuranLabTheme() {
 
     t.header_bg    = IM_COL32(  2,   8,  18, 245);
     t.active_bg    = IM_COL32(  0,  55,  85, 180);
-    t.input_bg     = IM_COL32(  0,  18,  30, 230);
+    t.input_bg     = IM_COL32(  4,  26,  42, 235);
+    t.input_border = IM_COL32(  0, 190, 220, 150);
     t.avatar_bg    = IM_COL32(  0, 165, 215, 255);
     t.unread_dot   = IM_COL32(220,  40,  40, 255);
     t.pin_accent   = IM_COL32(  0, 210, 255, 255);
@@ -2011,7 +2213,8 @@ static TyrianTheme BuildSylvariGroveTheme() {
 
     t.header_bg    = IM_COL32(  5,  16,   8, 245);
     t.active_bg    = IM_COL32( 18,  70,  32, 185);
-    t.input_bg     = IM_COL32(  8,  22,  12, 230);
+    t.input_bg     = IM_COL32( 12,  30,  16, 235);
+    t.input_border = IM_COL32( 45, 200,  85, 140);
     t.avatar_bg    = IM_COL32( 30, 180,  80, 255);
     t.unread_dot   = IM_COL32(220,  40,  40, 255);
     t.pin_accent   = IM_COL32( 55, 230, 110, 255);
@@ -2040,6 +2243,370 @@ static TyrianTheme BuildSylvariGroveTheme() {
     return t;
 }
 
+// ── Divinity's Reach draw hooks ───────────────────────────────────────────────
+
+static void DivinityDustMotes(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi   = i * 0.6180339f;
+        float speed = 6.0f + phi * 10.0f;
+        float drift = sinf(t * 0.3f + phi * 5.0f) * 14.0f;
+        float px    = mn.x + fmodf(phi * w * 2.1f + drift, w);
+        float py    = mx.y - fmodf(t * speed + phi * h, h);
+        float pulse = 0.35f + 0.65f * sinf(t * 0.9f + phi * 6.28f);
+        float r     = 0.6f + pulse * 0.9f;
+        int   a     = (int)(10 + pulse * 28);
+        // warm golden dust
+        ImU32 col = (i % 2 == 0)
+            ? IM_COL32(255, 220, 140, a)
+            : IM_COL32(255, 200,  90, a);
+        dl->AddCircleFilled(ImVec2(px, py), r, col);
+    }
+}
+
+static void DivinityLightRays(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    // Gentle breathe: rays pulse slowly in opacity
+    float breathe = 0.50f + 0.50f * sinf(t * 0.22f);
+
+    // Source: upper-right corner (like light through a high arched window)
+    ImVec2 src(mx.x - w * 0.08f, mn.y - h * 0.05f);
+
+    struct Ray { float angL, angR, alpha; };
+    const Ray rays[] = {
+        { -0.62f, -0.48f, 0.045f },
+        { -0.52f, -0.40f, 0.060f },
+        { -0.44f, -0.34f, 0.048f },
+        { -0.36f, -0.26f, 0.038f },
+        { -0.72f, -0.60f, 0.030f },
+    };
+    float len = sqrtf(w * w + h * h) * 1.2f;
+    for (auto& ray : rays) {
+        float a1 = ray.angL + (float)M_PI, a2 = ray.angR + (float)M_PI;
+        ImVec2 p1(src.x + cosf(a1) * len, src.y + sinf(a1) * len);
+        ImVec2 p2(src.x + cosf(a2) * len, src.y + sinf(a2) * len);
+        int alpha = (int)(ray.alpha * breathe * 255.0f);
+        ImU32 col = IM_COL32(255, 230, 160, alpha);
+        dl->AddTriangleFilled(src, p1, p2, col);
+    }
+}
+
+static void DivinityReachDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    // Warm ambient glow rising from below
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.25f), mx,
+        IM_COL32(0,0,0,0), IM_COL32(0,0,0,0),
+        IM_COL32(60, 40, 10, 28), IM_COL32(60, 40, 10, 28));
+
+    DivinityLightRays(dl, mn, mx);
+    DivinityDustMotes(dl, mn, mx, 18);
+
+    // Subtle top vignette
+    dl->AddRectFilledMultiColor(
+        mn, ImVec2(mx.x, mn.y + h * 0.06f),
+        IM_COL32(20, 14, 4, 60), IM_COL32(20, 14, 4, 60),
+        IM_COL32(0,0,0,0),       IM_COL32(0,0,0,0));
+}
+
+static void DivinityReachDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    DivinityLightRays(dl, mn, mx);
+    DivinityDustMotes(dl, mn, mx, 8);
+}
+
+static TyrianTheme BuildDivinityReachTheme() {
+    TyrianTheme t;
+    t.name        = "Divinity's Reach";
+    t.description = "Warm ivory and gold — cathedral light rays, drifting dust, royal human elegance";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.10f, 0.08f, 0.05f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.09f, 0.07f, 0.04f, 0.85f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.13f, 0.10f, 0.06f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.55f, 0.42f, 0.18f, 0.45f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.16f, 0.12f, 0.06f, 0.75f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.24f, 0.18f, 0.08f, 0.85f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.34f, 0.25f, 0.10f, 0.90f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.10f, 0.08f, 0.04f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.22f, 0.16f, 0.06f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.08f, 0.06f, 0.03f, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.12f, 0.09f, 0.04f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.06f, 0.04f, 0.02f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.50f, 0.38f, 0.14f, 0.75f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.65f, 0.50f, 0.18f, 0.90f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.80f, 0.62f, 0.22f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.90f, 0.72f, 0.20f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.72f, 0.55f, 0.16f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.92f, 0.74f, 0.22f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.22f, 0.16f, 0.06f, 0.80f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.36f, 0.26f, 0.09f, 0.90f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.52f, 0.38f, 0.12f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.20f, 0.14f, 0.05f, 0.70f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.34f, 0.24f, 0.08f, 0.80f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.48f, 0.34f, 0.11f, 0.90f);
+    c[ImGuiCol_Separator]            = ImVec4(0.44f, 0.32f, 0.10f, 0.40f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.60f, 0.44f, 0.15f, 0.70f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.80f, 0.60f, 0.20f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.40f, 0.28f, 0.08f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.60f, 0.44f, 0.14f, 0.60f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.80f, 0.60f, 0.20f, 0.90f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.13f, 0.09f, 0.04f, 0.86f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.36f, 0.26f, 0.09f, 0.90f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.26f, 0.19f, 0.07f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.08f, 0.06f, 0.03f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.16f, 0.12f, 0.04f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.94f, 0.90f, 0.80f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.52f, 0.46f, 0.32f, 1.00f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.88f, 0.70f, 0.20f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.80f, 0.62f, 0.18f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.95f, 0.76f, 0.24f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.14f, 0.10f, 0.04f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.40f, 0.28f, 0.08f, 0.60f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.26f, 0.18f, 0.06f, 0.40f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.02f, 0.01f, 0.00f, 0.60f);
+
+    // Elegant rounding — refined but not as soft as Sylvari
+    s.WindowRounding    = 6.0f;
+    s.ChildRounding     = 4.0f;
+    s.FrameRounding     = 4.0f;
+    s.PopupRounding     = 6.0f;
+    s.ScrollbarRounding = 6.0f;
+    s.GrabRounding      = 4.0f;
+    s.TabRounding       = 4.0f;
+
+    // Chat colors — warm stone and royal blue
+    t.bubble_self     = IM_COL32( 30,  50,  95, 220);
+    t.bubble_self_top = IM_COL32( 42,  66, 122, 225);
+    t.bubble_self_bot = IM_COL32( 16,  30,  62, 235);
+    t.bubble_other    = IM_COL32( 52,  40,  20, 215);
+    t.bubble_other_top= IM_COL32( 66,  50,  24, 220);
+    t.bubble_other_bot= IM_COL32( 30,  22,  10, 235);
+    t.bubble_rounding = 10.0f;
+
+    t.header_bg    = IM_COL32( 18,  14,   6, 245);
+    t.active_bg    = IM_COL32( 38,  28,  80, 185);
+    t.input_bg     = IM_COL32( 22,  17,   8, 235);
+    t.input_border = IM_COL32(180, 138,  45, 130);
+    t.avatar_bg    = IM_COL32(180, 140,  40, 255);
+    t.unread_dot   = IM_COL32(220,  40,  40, 255);
+    t.pin_accent   = IM_COL32(220, 175,  50, 255);
+
+    t.sender_self   = ImVec4(0.55f, 0.75f, 1.00f, 1.0f);
+    t.sender_other  = ImVec4(0.94f, 0.88f, 0.72f, 1.0f);
+    t.timestamp     = ImVec4(0.50f, 0.44f, 0.30f, 1.0f);
+    t.unread_label  = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+    t.status_ok     = ImVec4(0.40f, 0.88f, 0.35f, 1.0f);
+    t.status_warn   = ImVec4(1.00f, 0.75f, 0.10f, 1.0f);
+    t.status_err    = ImVec4(1.00f, 0.32f, 0.28f, 1.0f);
+
+    // Warm amber glow at the bottom
+    t.chat_bg_top = IM_COL32(0, 0, 0, 0);
+    t.chat_bg_bot = IM_COL32(40, 25, 5, 30);
+
+    // Measured, stately animation
+    t.bob_amplitude   = 3.0f;
+    t.bob_period_ms   = 2800.0f;
+    t.flash_period_ms = 1200.0f;
+    t.fade_ms         = 220.0f;
+
+    t.draw_chat_bg     = DivinityReachDrawChatBg;
+    t.draw_contacts_bg = DivinityReachDrawContactsBg;
+
+    return t;
+}
+
+// ── Hoelbrak draw hooks ───────────────────────────────────────────────────────
+
+static void HoelbrakSnowflakes(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi    = i * 0.6180339f;
+        float speed  = 18.0f + phi * 28.0f;
+        float wobble = sinf(t * 0.4f + phi * 7.0f) * 12.0f;
+        float px     = mn.x + fmodf(phi * w * 1.9f + wobble, w);
+        float py     = mn.y + fmodf(t * speed + phi * h, h);
+        float pulse  = 0.4f + 0.6f * sinf(t * 1.2f + phi * 5.0f);
+        float r      = 0.7f + pulse * 1.0f;
+        int   a      = (int)(14 + pulse * 36);
+        ImU32 col    = (i % 3 == 0)
+            ? IM_COL32(180, 220, 255, a)
+            : (i % 3 == 1) ? IM_COL32(220, 240, 255, a)
+                           : IM_COL32(140, 200, 255, a);
+        dl->AddCircleFilled(ImVec2(px, py), r, col);
+        // Occasional slightly larger flake
+        if (i % 4 == 0 && pulse > 0.70f)
+            dl->AddCircleFilled(ImVec2(px, py), r * 2.2f,
+                IM_COL32(200, 230, 255, (int)(a * 0.30f)));
+    }
+}
+
+static void HoelbrakAurora(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+
+    // Three overlapping aurora bands rippling across the top ~30% of the panel
+    struct Band { float yBase; ImU32 col; float amp; float freq; float speed; };
+    const Band bands[] = {
+        { 0.08f, IM_COL32( 40, 200, 180,  22), 0.04f, 2.2f, 0.28f },
+        { 0.16f, IM_COL32( 60, 140, 255,  18), 0.05f, 1.8f, 0.20f },
+        { 0.24f, IM_COL32(120,  80, 220,  14), 0.04f, 2.6f, 0.35f },
+    };
+
+    constexpr int segs = 24;
+    for (auto& b : bands) {
+        float segW = w / (float)segs;
+        for (int i = 0; i < segs; i++) {
+            float x0 = mn.x + i * segW;
+            float x1 = x0 + segW + 1.0f;  // +1 to avoid gaps
+            float phase0 = (float)i / segs;
+            float phase1 = (float)(i + 1) / segs;
+            float y0top = mn.y + h * (b.yBase + b.amp * sinf(b.freq * phase0 * (float)M_PI * 2.0f + t * b.speed));
+            float y1top = mn.y + h * (b.yBase + b.amp * sinf(b.freq * phase1 * (float)M_PI * 2.0f + t * b.speed));
+            float bandH  = h * 0.10f;
+            // Each segment: thin quad — approximate with two triangles
+            ImVec2 tl(x0, y0top),          tr(x1, y1top);
+            ImVec2 bl(x0, y0top + bandH),  br(x1, y1top + bandH);
+            dl->AddTriangleFilled(tl, tr, br, b.col);
+            dl->AddTriangleFilled(tl, br, bl, b.col);
+        }
+    }
+}
+
+static void HoelbrakDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    // Deep cold vignette at the bottom — like frost on stone floor
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.20f), mx,
+        IM_COL32(0,0,0,0), IM_COL32(0,0,0,0),
+        IM_COL32(10, 25, 50, 35), IM_COL32(10, 25, 50, 35));
+
+    HoelbrakAurora(dl, mn, mx);
+    HoelbrakSnowflakes(dl, mn, mx, 20);
+
+    // Soft bottom vignette
+    dl->AddRectFilledMultiColor(
+        mn, ImVec2(mx.x, mn.y + h * 0.05f),
+        IM_COL32(5, 10, 22, 50), IM_COL32(5, 10, 22, 50),
+        IM_COL32(0,0,0,0),       IM_COL32(0,0,0,0));
+}
+
+static void HoelbrakDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    HoelbrakAurora(dl, mn, mx);
+    HoelbrakSnowflakes(dl, mn, mx, 9);
+}
+
+static TyrianTheme BuildHoelbrakTheme() {
+    TyrianTheme t;
+    t.name        = "Hoelbrak";
+    t.description = "Icy navy and silver — aurora shimmer, falling snow, Norn mountain strength";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.05f, 0.07f, 0.12f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.04f, 0.06f, 0.10f, 0.85f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.07f, 0.09f, 0.16f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.28f, 0.46f, 0.68f, 0.45f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.10f, 0.14f, 0.22f, 0.75f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.14f, 0.20f, 0.32f, 0.85f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.18f, 0.28f, 0.44f, 0.90f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.05f, 0.07f, 0.13f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.10f, 0.16f, 0.28f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.04f, 0.06f, 0.10f, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.06f, 0.08f, 0.14f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.03f, 0.04f, 0.08f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.28f, 0.46f, 0.68f, 0.75f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.38f, 0.60f, 0.85f, 0.90f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.50f, 0.75f, 1.00f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.55f, 0.82f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.40f, 0.65f, 0.92f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.58f, 0.84f, 1.00f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.10f, 0.16f, 0.28f, 0.80f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.18f, 0.28f, 0.46f, 0.90f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.26f, 0.40f, 0.64f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.12f, 0.18f, 0.30f, 0.70f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.18f, 0.28f, 0.46f, 0.80f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.24f, 0.38f, 0.60f, 0.90f);
+    c[ImGuiCol_Separator]            = ImVec4(0.22f, 0.36f, 0.54f, 0.40f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.34f, 0.54f, 0.78f, 0.70f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.50f, 0.75f, 1.00f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.22f, 0.36f, 0.54f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.36f, 0.56f, 0.80f, 0.60f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.50f, 0.75f, 1.00f, 0.90f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.06f, 0.09f, 0.16f, 0.86f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.18f, 0.28f, 0.46f, 0.90f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.12f, 0.20f, 0.34f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.04f, 0.06f, 0.10f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.08f, 0.12f, 0.20f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.88f, 0.92f, 0.98f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.36f, 0.48f, 0.62f, 1.00f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.55f, 0.82f, 1.00f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.46f, 0.72f, 0.96f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.60f, 0.86f, 1.00f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.07f, 0.10f, 0.18f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.24f, 0.38f, 0.56f, 0.60f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.14f, 0.22f, 0.36f, 0.40f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.02f, 0.06f, 0.65f);
+
+    // Sturdy corners — heavy but not industrial
+    s.WindowRounding    = 4.0f;
+    s.ChildRounding     = 3.0f;
+    s.FrameRounding     = 3.0f;
+    s.PopupRounding     = 4.0f;
+    s.ScrollbarRounding = 4.0f;
+    s.GrabRounding      = 3.0f;
+    s.TabRounding       = 3.0f;
+
+    // Chat colors — deep navy with icy blue
+    t.bubble_self     = IM_COL32( 20,  44,  90, 225);
+    t.bubble_self_top = IM_COL32( 28,  58, 115, 230);
+    t.bubble_self_bot = IM_COL32( 10,  26,  58, 240);
+    t.bubble_other    = IM_COL32( 28,  38,  60, 215);
+    t.bubble_other_top= IM_COL32( 36,  48,  76, 220);
+    t.bubble_other_bot= IM_COL32( 16,  22,  40, 235);
+    t.bubble_rounding = 5.0f;
+
+    t.header_bg    = IM_COL32( 10,  14,  26, 245);
+    t.active_bg    = IM_COL32( 22,  48,  90, 185);
+    t.input_bg     = IM_COL32( 12,  18,  34, 235);
+    t.input_border = IM_COL32( 85, 165, 230, 145);
+    t.avatar_bg    = IM_COL32( 70, 150, 220, 255);
+    t.unread_dot   = IM_COL32(220,  40,  40, 255);
+    t.pin_accent   = IM_COL32(100, 190, 255, 255);
+
+    t.sender_self   = ImVec4(0.55f, 0.82f, 1.00f, 1.0f);
+    t.sender_other  = ImVec4(0.82f, 0.90f, 0.98f, 1.0f);
+    t.timestamp     = ImVec4(0.36f, 0.50f, 0.66f, 1.0f);
+    t.unread_label  = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+    t.status_ok     = ImVec4(0.36f, 0.90f, 0.60f, 1.0f);
+    t.status_warn   = ImVec4(1.00f, 0.78f, 0.12f, 1.0f);
+    t.status_err    = ImVec4(1.00f, 0.34f, 0.30f, 1.0f);
+
+    // Cold blue-indigo at the bottom
+    t.chat_bg_top = IM_COL32(0, 0, 0, 0);
+    t.chat_bg_bot = IM_COL32(8, 18, 40, 32);
+
+    // Slow, heavy — a giant's pace
+    t.bob_amplitude   = 4.5f;
+    t.bob_period_ms   = 3600.0f;
+    t.flash_period_ms = 1400.0f;
+    t.fade_ms         = 260.0f;
+
+    t.draw_chat_bg     = HoelbrakDrawChatBg;
+    t.draw_contacts_bg = HoelbrakDrawContactsBg;
+
+    return t;
+}
+
 using ThemeBuilder = TyrianTheme(*)();
 static const ThemeBuilder kBuiltinThemes[] = {
     BuildNexusTheme,
@@ -2047,6 +2614,8 @@ static const ThemeBuilder kBuiltinThemes[] = {
     BuildCharrSteelTheme,
     BuildAsuranLabTheme,
     BuildSylvariGroveTheme,
+    BuildDivinityReachTheme,
+    BuildHoelbrakTheme,
 };
 
 static void ScanThemes() {
@@ -2151,7 +2720,22 @@ static void RenderFloatingIcon() {
                 if (unread_contact_count > 0) {
                     for (auto* c : TyrianIM::ChatManager::GetConversations()) {
                         if (c->unread_count > 0) {
+                            // Persist current draft before switching
+                            if (!g_SelectedContact.empty()) {
+                                if (g_InputBuf[0])
+                                    g_Drafts[g_SelectedContact] = g_InputBuf;
+                                else
+                                    g_Drafts.erase(g_SelectedContact);
+                            }
                             g_SelectedContact = c->contact;
+                            // Restore draft for the new contact
+                            auto dit = g_Drafts.find(c->contact);
+                            if (dit != g_Drafts.end()) {
+                                strncpy(g_InputBuf, dit->second.c_str(), sizeof(g_InputBuf) - 1);
+                                g_InputBuf[sizeof(g_InputBuf) - 1] = '\0';
+                            } else {
+                                g_InputBuf[0] = '\0';
+                            }
                             g_FocusInput = true;
                             break;
                         }
@@ -2283,7 +2867,22 @@ static void RenderContactList(float width) {
         }
 
         if (ImGui::Selectable(("##contact_" + convo->contact).c_str(), false, 0, ImVec2(0, itemHeight))) {
+            // Persist current draft before switching
+            if (!g_SelectedContact.empty()) {
+                if (g_InputBuf[0])
+                    g_Drafts[g_SelectedContact] = g_InputBuf;
+                else
+                    g_Drafts.erase(g_SelectedContact);
+            }
             g_SelectedContact = convo->contact;
+            // Restore draft for the new contact
+            auto dit = g_Drafts.find(convo->contact);
+            if (dit != g_Drafts.end()) {
+                strncpy(g_InputBuf, dit->second.c_str(), sizeof(g_InputBuf) - 1);
+                g_InputBuf[sizeof(g_InputBuf) - 1] = '\0';
+            } else {
+                g_InputBuf[0] = '\0';
+            }
             g_ScrollToBottom = true;
             g_FocusInput = true;
             double now = ImGui::GetTime();
@@ -2581,6 +3180,8 @@ static void RenderMessageArea() {
             for (size_t i = 0; i < convo->messages.size(); i++) {
                 ComputeBubbleLayout(convo, i, areaWidth, g_FontScale, font);
             }
+            // Request API resolution for all pending links in the newly viewed conversation
+            RequestConversationLinks(convo);
         } else if (layoutParamsChanged) {
             // Width or scale changed — queue all for amortized recompute
             g_BubbleCache.areaWidth = areaWidth;
@@ -2598,7 +3199,22 @@ static void RenderMessageArea() {
             g_BubbleCache.layouts.resize(convo->messages.size());
             for (size_t i = oldCount; i < convo->messages.size(); i++) {
                 ComputeBubbleLayout(convo, i, areaWidth, g_FontScale, font);
+                // Request resolution for any links in new messages
+                const auto& nmsg = convo->messages[i];
+                if (nmsg.has_links) {
+                    for (size_t si = 0; si < nmsg.segments.size(); si++) {
+                        const auto& seg = nmsg.segments[si];
+                        if (seg.is_link && seg.link.state == TyrianIM::LinkState::Pending)
+                            TyrianIM::GW2API::RequestLink(convo->contact, i, si, seg.link);
+                    }
+                }
             }
+        }
+
+        // Link resolved on the API worker thread — queue all layouts for recompute
+        if (g_LinksDirty.exchange(false)) {
+            for (size_t i = 0; i < g_BubbleCache.layouts.size(); i++)
+                g_LayoutQueue.push_back(i);
         }
 
         // Process amortized batch (for resize/scale changes)
@@ -2690,26 +3306,87 @@ static void RenderMessageArea() {
                 ImVec2(bubbleX + layout.bubbleW - padding - layout.timeSize.x, cursor.y + padding + (layout.nameSize.y - layout.timeSize.y)),
                 ImGui::ColorConvertFloat4ToU32(tsCol), layout.displayTimestamp.c_str());
 
-            // Message text (wrapped)
+            // Message text (wrapped) — plain or segmented
             float textY = cursor.y + padding + layout.nameSize.y + 4;
-            font->RenderText(dl, fs,
-                ImVec2(bubbleX + padding, textY),
-                applyAlpha(ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Text]), msgAlpha),
-                ImVec4(bubbleX + padding, textY, bubbleX + layout.bubbleW - padding, textY + layout.msgSize.y + 10),
-                msg.text.c_str(), msg.text.c_str() + msg.text.size(), layout.textWrapWidth);
+            ImU32 textCol = applyAlpha(
+                ImGui::ColorConvertFloat4ToU32(ImGui::GetStyle().Colors[ImGuiCol_Text]), msgAlpha);
+            ImVec4 clipRect(bubbleX + padding, textY,
+                            bubbleX + layout.bubbleW - padding, textY + layout.msgSize.y + 10);
+            ImVec2 textOrigin(bubbleX + padding, textY);
 
-            // Click bubble to copy message
+            if (!msg.has_links) {
+                font->RenderText(dl, fs, textOrigin, textCol, clipRect,
+                    msg.text.c_str(), msg.text.c_str() + msg.text.size(), layout.textWrapWidth);
+            } else {
+                for (int si = 0; si < (int)msg.segments.size() && si < (int)layout.seg_layouts.size(); si++) {
+                    const auto& seg = msg.segments[si];
+                    const auto& sl  = layout.seg_layouts[si];
+                    ImVec2 sp(textOrigin.x + sl.pos.x, textOrigin.y + sl.pos.y);
+                    if (!seg.is_link) {
+                        font->RenderText(dl, fs, sp, textCol, clipRect,
+                            seg.text.c_str(), seg.text.c_str() + seg.text.size(), layout.textWrapWidth);
+                    } else {
+                        ImU32 lc = applyAlpha(seg.link.colour, msgAlpha);
+                        dl->AddText(font, fs, sp, lc, seg.link.display.c_str());
+                        // Underline
+                        dl->AddLine(ImVec2(sp.x, sp.y + sl.size.y - 2),
+                                    ImVec2(sp.x + sl.size.x, sp.y + sl.size.y - 2), lc);
+                    }
+                }
+            }
+
+            // Whole-bubble invisible button (copy text on click; lower priority than link buttons)
             ImGui::SetCursorScreenPos(ImVec2(bubbleX, cursor.y));
             snprintf(bubbleIdBuf, sizeof(bubbleIdBuf), "##b_%zu", mi);
             if (ImGui::InvisibleButton(bubbleIdBuf, ImVec2(layout.bubbleW, layout.bubbleH))) {
-                ImGui::SetClipboardText(msg.text.c_str());
+                ImGui::SetClipboardText(NormalizeGW2Text(msg.text).c_str());
                 g_ClipboardMsg = "Copied to clipboard";
                 g_ClipboardMsgExpiry = ImGui::GetTime() + 2.0;
             }
-            if (ImGui::IsItemHovered()) {
+            bool bubbleHovered = ImGui::IsItemHovered();
+            if (bubbleHovered) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                if (msg.failed) {
+                if (msg.failed)
                     ImGui::SetTooltip("Message not delivered — player is offline");
+            }
+
+            // Per-link buttons rendered on top of the bubble button — they win hover/click in their area
+            if (msg.has_links) {
+                for (int si = 0; si < (int)msg.segments.size() && si < (int)layout.seg_layouts.size(); si++) {
+                    const auto& seg = msg.segments[si];
+                    const auto& sl  = layout.seg_layouts[si];
+                    if (!seg.is_link) continue;
+                    ImVec2 sp(textOrigin.x + sl.pos.x, textOrigin.y + sl.pos.y);
+                    ImGui::SetCursorScreenPos(sp);
+                    char linkIdBuf[48];
+                    snprintf(linkIdBuf, sizeof(linkIdBuf), "##lnk_%zu_%d", mi, si);
+                    ImGui::InvisibleButton(linkIdBuf, sl.size);
+                    bool lHovered = ImGui::IsItemHovered();
+                    bool lClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+                    if (lHovered) {
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        ImGui::BeginTooltip();
+                        ImGui::TextColored(
+                            ImGui::ColorConvertU32ToFloat4(seg.link.colour),
+                            "%s", seg.link.display.c_str());
+                        if (!seg.link.tooltip_text.empty())
+                            ImGui::TextUnformatted(seg.link.tooltip_text.c_str());
+                        ImGui::EndTooltip();
+                    }
+                    if (lClicked) {
+                        std::string ctxt =
+                            (seg.link.type == TyrianIM::GW2LinkType::AE2Build &&
+                             !seg.link.ae2_chat_link.empty())
+                            ? seg.link.ae2_chat_link : NormalizeGW2Text(seg.link.raw);
+                        ImGui::SetClipboardText(ctxt.c_str());
+                        if (seg.link.type == TyrianIM::GW2LinkType::MapLink)
+                            g_ClipboardMsg = "Waypoint link copied \xe2\x80\x94 paste in chat to use";
+                        else if (seg.link.type == TyrianIM::GW2LinkType::AE2Build)
+                            g_ClipboardMsg = "Build link copied";
+                        else
+                            g_ClipboardMsg = "Link copied";
+                        g_ClipboardMsgExpiry = ImGui::GetTime() + 2.5;
+                    }
                 }
             }
 
@@ -2729,13 +3406,22 @@ static void RenderMessageArea() {
             float sendBtnW = 60.0f;
             float availW = ImGui::GetContentRegionAvail().x;
             ImGui::PushItemWidth(availW - sendBtnW - 8);
+            bool hasBorder = (g_ActiveTheme.input_border >> 24) > 0;
             ImGui::PushStyleColor(ImGuiCol_FrameBg, ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.input_bg));
+            if (hasBorder) {
+                ImGui::PushStyleColor(ImGuiCol_Border, ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.input_border));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            }
             if (g_FocusInput) {
                 ImGui::SetKeyboardFocusHere();
                 g_FocusInput = false;
             }
             bool enter_pressed = ImGui::InputText("##WhisperInput", g_InputBuf, sizeof(g_InputBuf),
                 ImGuiInputTextFlags_EnterReturnsTrue);
+            if (hasBorder) {
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+            }
             ImGui::PopStyleColor();
             ImGui::PopItemWidth();
 
@@ -2760,12 +3446,14 @@ static void RenderMessageArea() {
                 g_IsSending = true;
                 SendWhisperViaChatbox(whisper_target, text);
                 g_InputBuf[0] = '\0';
+                g_Drafts.erase(g_SelectedContact);
                 g_FocusInput = true;
             }
         }
 
         ImGui::SetWindowFontScale(1.0f);
     }
+
 
     ImGui::EndChild();
 }
@@ -3041,6 +3729,7 @@ void AddonLoad(AddonAPI_t* aApi) {
     ScanSoundFiles();
 
     // Initialize subsystems
+    TyrianIM::GW2API::Initialize();
     TyrianIM::ChatManager::Initialize(g_DataDir);
     TyrianIM::ChatManager::LoadHistory();
     TyrianIM::ChatManager::SetPinnedContacts(g_PinnedContactNames);
@@ -3100,6 +3789,7 @@ void AddonUnload() {
     SaveSettings();
 
     // Shutdown subsystems
+    TyrianIM::GW2API::Shutdown();
     TyrianIM::WhisperHook::Shutdown();
     TyrianIM::ChatManager::Shutdown();
     g_MessageArrivalTimes.clear();
