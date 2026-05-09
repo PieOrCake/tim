@@ -1261,7 +1261,12 @@ static TyrianTheme BuildGW2DarkTheme() {
 
     // Build and copy the GW2 style into the theme
     theme.imgui_style = BuildGW2Theme();
-    // chat colors use struct field defaults
+
+    // Chat colors — warm gold palette to match the ImGui gold accents
+    theme.bubble_self   = IM_COL32( 75,  55,  15, 210);  // dark amber (was blue)
+    theme.active_bg     = IM_COL32( 80,  60,  15, 185);  // warm gold highlight (was blue)
+    theme.avatar_bg     = IM_COL32(155, 115,  35, 255);  // warm gold avatar (was blue)
+    theme.sender_self   = ImVec4(0.92f, 0.76f, 0.28f, 1.0f);  // gold name (was cyan)
     theme.bubble_self_top = theme.bubble_self_bot = theme.bubble_self;
     theme.bubble_other_top = theme.bubble_other_bot = theme.bubble_other;
     theme.bubble_rounding = 10.0f;
@@ -1814,7 +1819,7 @@ static void RenderFloatingIcon() {
         ImDrawList* fdl = ImGui::GetForegroundDrawList();
         float badgeRadius = 8.0f * s;
         ImVec2 badgeCenter(bx1 - 2.0f * s, by0 - 2.0f * s);
-        fdl->AddCircleFilled(badgeCenter, badgeRadius, g_ActiveTheme.unread_dot, 16);
+        fdl->AddCircleFilled(badgeCenter, badgeRadius, IM_COL32(220, 40, 40, 255), 16);
         char badgeBuf[8];
         int displayCount = (unread_contact_count > 99) ? 99 : unread_contact_count;
         snprintf(badgeBuf, sizeof(badgeBuf), "%d", displayCount);
@@ -1822,7 +1827,7 @@ static void RenderFloatingIcon() {
         ImVec2 badgeTextSize = font->CalcTextSizeA(badgeFs, FLT_MAX, 0.0f, badgeBuf);
         fdl->AddText(font, badgeFs,
             ImVec2(badgeCenter.x - badgeTextSize.x * 0.5f, badgeCenter.y - badgeTextSize.y * 0.5f),
-            ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.unread_label), badgeBuf);
+            IM_COL32(255, 255, 255, 255), badgeBuf);
     }
 
     ImGui::End();
@@ -1981,7 +1986,7 @@ static void RenderContactList(float width) {
             ImVec2 nameSize = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, primaryName.c_str());
             float badgeRadius = fs * 0.55f;
             ImVec2 badgeCenter(textX + nameSize.x + badgeRadius + 5.0f, cursor.y + 6.0f + fs * 0.5f);
-            dl->AddCircleFilled(badgeCenter, badgeRadius, g_ActiveTheme.unread_dot, 12);
+            dl->AddCircleFilled(badgeCenter, badgeRadius, IM_COL32(220, 40, 40, 255), 12);
             float badgeFs = fs * 0.72f;
             ImVec2 countSize = font->CalcTextSizeA(badgeFs, FLT_MAX, 0.0f, unreadBuf);
             dl->AddText(font, badgeFs,
