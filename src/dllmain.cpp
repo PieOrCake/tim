@@ -1920,6 +1920,22 @@ static void RenderFloatingIcon() {
             SaveSettings();
         } else {
             // Pure click — toggle main window and navigate to unread
+            g_WindowVisible = !g_WindowVisible;
+            if (g_WindowVisible) {
+                g_ScrollToBottom = true;
+                if (unread_contact_count > 0) {
+                    for (auto* c : TyrianIM::ChatManager::GetConversations()) {
+                        if (c->unread_count > 0) {
+                            g_SelectedContact = c->contact;
+                            g_FocusInput = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        s_IconWasDragged = false;
+    }
 
     // Resolve theme icon (if set)
     if (!g_ActiveTheme.icon_texture && !g_ActiveTheme.icon_texture_path.empty() && APIDefs) {
@@ -1948,14 +1964,14 @@ static void RenderFloatingIcon() {
                           g_ActiveTheme.bubble_self, 8.0f * s);
     }
 
-    // Pulsing blue overlay when flashing (unread messages)
+    // Pulsing overlay when flashing (unread messages)
     if (is_flashing) {
         ImDrawList* fdl = ImGui::GetForegroundDrawList();
         fdl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1),
                            (g_ActiveTheme.bubble_self & 0x00FFFFFFu) | ((ImU32)((g_ActiveTheme.bubble_self >> 24) * flash_alpha * 0.35f) << 24), 8.0f * s);
     }
 
-    // Unread contact count badge (top-right corner of bubble, drawn on foreground list to avoid clipping)
+    // Unread contact count badge
     if (unread_contact_count > 0) {
         ImDrawList* fdl = ImGui::GetForegroundDrawList();
         float badgeRadius = 8.0f * s;
@@ -1969,23 +1985,6 @@ static void RenderFloatingIcon() {
         fdl->AddText(font, badgeFs,
             ImVec2(badgeCenter.x - badgeTextSize.x * 0.5f, badgeCenter.y - badgeTextSize.y * 0.5f),
             ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.unread_label), badgeBuf);
-    }
-
-            g_WindowVisible = !g_WindowVisible;
-            if (g_WindowVisible) {
-                g_ScrollToBottom = true;
-                if (unread_contact_count > 0) {
-                    for (auto* c : TyrianIM::ChatManager::GetConversations()) {
-                        if (c->unread_count > 0) {
-                            g_SelectedContact = c->contact;
-                            g_FocusInput = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        s_IconWasDragged = false;
     }
 
     ImGui::End();
