@@ -1385,7 +1385,8 @@ static void ApplyTheme(const TyrianTheme& theme) {
     // Reset lazily-resolved texture handles (will re-resolve on next render)
     g_ActiveTheme.bg_texture   = nullptr;
     g_ActiveTheme.icon_texture = nullptr;
-    InvalidateBubbleCache();
+    // No bubble cache invalidation — theme changes are purely visual (colours,
+    // rounding, draw hooks) and don't affect bubble sizes or timestamp strings.
 }
 
 static void ApplyNamedTheme(const std::string& name) {
