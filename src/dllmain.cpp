@@ -705,6 +705,7 @@ bool g_WindowVisible = false;
 // UI State
 static std::string g_SelectedContact;
 static std::string g_PendingDeleteContact;
+static bool g_ContextMenuContactPinned = false;
 static std::vector<std::string> g_PinnedContactNames;
 static std::string g_ClipboardMsg;
 static double g_ClipboardMsgExpiry = 0.0;
@@ -1522,11 +1523,11 @@ static void RenderContactList(float width) {
         // Right-click context menu
         std::string popupId = "##ctx_" + convo->contact;
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            g_ContextMenuContactPinned = TyrianIM::ChatManager::IsPinned(convo->contact);
             ImGui::OpenPopup(popupId.c_str());
         }
         if (ImGui::BeginPopup(popupId.c_str())) {
-            bool isPinned = TyrianIM::ChatManager::IsPinned(convo->contact);
-            if (ImGui::MenuItem(isPinned ? "Unpin" : "Pin")) {
+            if (ImGui::MenuItem(g_ContextMenuContactPinned ? "Unpin" : "Pin")) {
                 TyrianIM::ChatManager::TogglePin(convo->contact);
                 SaveSettings();
             }
