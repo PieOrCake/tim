@@ -1028,6 +1028,26 @@ struct TyrianTheme {
     ImU32  avatar_bg    = IM_COL32(60, 130, 180, 255);
     ImU32  unread_dot   = IM_COL32(255, 80,  80, 255);
     ImU32  pin_accent   = IM_COL32(180, 150, 60, 255);
+    // Bubble gradient (top/bottom; if equal = flat, uses bubble_rounding; if different = gradient, no rounding)
+    ImU32 bubble_self_top  = IM_COL32(30,  60, 100, 200);  // defaults match bubble_self
+    ImU32 bubble_self_bot  = IM_COL32(30,  60, 100, 200);
+    ImU32 bubble_other_top = IM_COL32(50,  50,  55, 200);  // defaults match bubble_other
+    ImU32 bubble_other_bot = IM_COL32(50,  50,  55, 200);
+    float bubble_rounding  = 10.0f;
+    // Background overlay (drawn over chat area, both colors transparent = none)
+    ImU32 chat_bg_top = IM_COL32(0, 0, 0, 0);  // top of chat area
+    ImU32 chat_bg_bot = IM_COL32(0, 0, 0, 0);  // bottom of chat area
+    // Animation parameters
+    float bob_amplitude   = 3.0f;    // floating icon vertical bob, pixels
+    float bob_period_ms   = 2000.0f; // bob period in milliseconds
+    float flash_period_ms = 1000.0f; // flash/pulse period in milliseconds
+    float fade_ms         = 150.0f;  // message fade-in duration in milliseconds
+    // Background texture (TOML themes: filename relative to themes/ dir)
+    std::string    bg_texture_path;
+    Texture_t*     bg_texture = nullptr;
+    // Per-theme floating icon (TOML themes: filename relative to themes/ dir)
+    std::string    icon_texture_path;
+    Texture_t*     icon_texture = nullptr;
     // ImVec4 chat colors ([R,G,B,A] 0-1 floats)
     ImVec4 sender_self  = {0.4f, 0.8f, 1.0f, 1.0f};
     ImVec4 sender_other = {0.9f, 0.7f, 0.3f, 1.0f};
@@ -1411,6 +1431,9 @@ static TyrianTheme BuildGW2DarkTheme() {
     // Build and copy the GW2 style into the theme
     theme.imgui_style = BuildGW2Theme();
     // chat colors use struct field defaults
+    theme.bubble_self_top = theme.bubble_self_bot = theme.bubble_self;
+    theme.bubble_other_top = theme.bubble_other_bot = theme.bubble_other;
+    theme.bubble_rounding = 10.0f;
     return theme;
 }
 
@@ -1471,15 +1494,34 @@ static TyrianTheme BuildCharrSteelTheme() {
     c[ImGuiCol_TableBorderLight]     = ImVec4(0.20f, 0.10f, 0.08f, 0.40f);
     c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.60f);
 
-    // Chat-specific colors
+    // Chat-specific colors — gradients
     t.bubble_self   = IM_COL32( 85,  20,  14, 225);
     t.bubble_other  = IM_COL32( 46,  40,  40, 225);
+    t.bubble_self_top  = IM_COL32(110,  28,  18, 230);  // bright dark-red top
+    t.bubble_self_bot  = IM_COL32( 45,   8,   5, 240);  // near-black bottom
+    t.bubble_other_top = IM_COL32( 62,  55,  54, 230);  // steel grey top
+    t.bubble_other_bot = IM_COL32( 28,  24,  24, 240);  // deep charcoal bottom
+
     t.header_bg     = IM_COL32( 22,  16,  15, 245);
     t.active_bg     = IM_COL32( 72,  16,  12, 185);
     t.input_bg      = IM_COL32( 18,  13,  12, 225);
     t.avatar_bg     = IM_COL32(165,  28,  20, 255);
     t.unread_dot    = IM_COL32(220,  40,  28, 255);
     t.pin_accent    = IM_COL32(195,  32,  22, 255);
+
+    // Chat area background — subtle dark red vignette at bottom
+    t.chat_bg_top = IM_COL32(  0,  0,  0,   0);   // transparent at top
+    t.chat_bg_bot = IM_COL32( 60,  5,  3,  40);   // faint blood-red glow at bottom
+
+    // Sharp industrial corners
+    t.bubble_rounding = 2.0f;
+
+    // Animation — slightly heavier bob, faster aggressive flash
+    t.bob_amplitude   = 4.0f;
+    t.bob_period_ms   = 1600.0f;  // slightly faster bob
+    t.flash_period_ms = 700.0f;   // faster, more urgent flash
+    t.fade_ms         = 200.0f;   // slightly slower fade-in for drama
+
     t.sender_self   = ImVec4(0.95f, 0.30f, 0.20f, 1.00f);
     t.sender_other  = ImVec4(0.86f, 0.80f, 0.78f, 1.00f);
     t.timestamp     = ImVec4(0.50f, 0.40f, 0.38f, 1.00f);
@@ -1499,6 +1541,9 @@ static std::string ThemesDir() {
 
 static void ApplyTheme(const TyrianTheme& theme) {
     g_ActiveTheme = theme;
+    // Reset lazily-resolved texture handles (will re-resolve on next render)
+    g_ActiveTheme.bg_texture   = nullptr;
+    g_ActiveTheme.icon_texture = nullptr;
     InvalidateBubbleCache();
 }
 
@@ -1533,6 +1578,8 @@ static void DeriveChatColorsFromStyle(TyrianTheme& t) {
     ImVec4 otherBg = c[ImGuiCol_FrameBg];
     otherBg.w      = std::min(1.0f, otherBg.w + 0.25f);
     t.bubble_other = toU32(otherBg);
+    t.bubble_self_top = t.bubble_self_bot = t.bubble_self;
+    t.bubble_other_top = t.bubble_other_bot = t.bubble_other;
 
     // Chrome — map directly to ImGui equivalents
     t.header_bg = toU32(c[ImGuiCol_TitleBg]);
@@ -1728,6 +1775,30 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
             readV4("status_ok",     t.status_ok);
             readV4("status_warn",   t.status_warn);
             readV4("status_err",    t.status_err);
+
+            // Gradient bubble colors
+            readU32("bubble_self_top",   t.bubble_self_top);
+            readU32("bubble_self_bot",   t.bubble_self_bot);
+            readU32("bubble_other_top",  t.bubble_other_top);
+            readU32("bubble_other_bot",  t.bubble_other_bot);
+
+            // Chat background overlay
+            readU32("chat_bg_top", t.chat_bg_top);
+            readU32("chat_bg_bot", t.chat_bg_bot);
+
+            // Shape and animation
+            auto readF = [&](const char* k, float& v) {
+                if (auto val = (*chat)[k].value<double>()) v = (float)*val;
+            };
+            readF("bubble_rounding",  t.bubble_rounding);
+            readF("bob_amplitude",    t.bob_amplitude);
+            readF("bob_period_ms",    t.bob_period_ms);
+            readF("flash_period_ms",  t.flash_period_ms);
+            readF("fade_ms",          t.fade_ms);
+
+            // Texture paths
+            if (auto v = (*chat)["bg_texture"].value<std::string>())   t.bg_texture_path   = *v;
+            if (auto v = (*chat)["icon_texture"].value<std::string>())  t.icon_texture_path = *v;
         }
 
         return t;
@@ -1794,14 +1865,14 @@ static void RenderFloatingIcon() {
     if (g_FloatingIconOnlyOnUnread && !is_flashing) return;
     float flash_alpha = 0.0f;
     if (is_flashing) {
-        float t = (float)(now_ms % 1000) / 1000.0f;
+        float t = (float)(now_ms % (uint64_t)g_ActiveTheme.flash_period_ms) / g_ActiveTheme.flash_period_ms;
         flash_alpha = 0.5f + 0.5f * sinf(t * 2.0f * 3.14159f);
     }
 
     float bobOffset = 0.0f;
     if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        float bobT = (float)(now_ms % 2000) / 2000.0f;  // 0–1 over 2 seconds
-        bobOffset = sinf(bobT * 2.0f * 3.14159f) * 3.0f; // ±3 px vertical
+        float bobT = (float)(now_ms % (uint64_t)g_ActiveTheme.bob_period_ms) / g_ActiveTheme.bob_period_ms;
+        bobOffset = sinf(bobT * 2.0f * 3.14159f) * g_ActiveTheme.bob_amplitude;
     }
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
@@ -1831,16 +1902,26 @@ static void RenderFloatingIcon() {
     ImVec2 wp = ImGui::GetWindowPos();
     ImFont* font = ImGui::GetFont();
 
-    // Resolve floating icon texture once it becomes available
+    // Resolve theme icon (if set)
+    if (!g_ActiveTheme.icon_texture && !g_ActiveTheme.icon_texture_path.empty() && APIDefs) {
+        std::string id   = "TYRIANIMTHEME_ICON_" + g_ActiveTheme.name;
+        std::string full = ThemesDir() + "/" + g_ActiveTheme.icon_texture_path;
+        g_ActiveTheme.icon_texture = APIDefs->Textures_GetOrCreateFromFile(id.c_str(), full.c_str());
+    }
+    // Resolve default floating icon
     if (!g_FloatIconTexture && APIDefs)
         g_FloatIconTexture = APIDefs->Textures_Get(TEX_FLOAT_ICON);
+
+    // Use theme icon if available, otherwise fall back to default
+    Texture_t* activeIcon = (g_ActiveTheme.icon_texture && g_ActiveTheme.icon_texture->Resource)
+                          ? g_ActiveTheme.icon_texture : g_FloatIconTexture;
 
     // Image bounds — small margin inside the window
     float bx0 = wp.x + 4.0f * s, by0 = wp.y + 4.0f * s;
     float bx1 = wp.x + 56.0f * s, by1 = wp.y + 56.0f * s;
 
-    if (g_FloatIconTexture && g_FloatIconTexture->Resource) {
-        dl->AddImage((ImTextureID)g_FloatIconTexture->Resource,
+    if (activeIcon && activeIcon->Resource) {
+        dl->AddImage((ImTextureID)activeIcon->Resource,
                      ImVec2(bx0, by0), ImVec2(bx1, by1));
     } else {
         // Fallback until texture loads
@@ -2202,11 +2283,33 @@ static void RenderMessageArea() {
         ImGui::BeginChild("##Messages", ImVec2(0, -input_height), false);
 
         ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Background texture (lazy-loaded per frame until resolved)
+        if (!g_ActiveTheme.bg_texture && !g_ActiveTheme.bg_texture_path.empty() && APIDefs) {
+            std::string id   = "TYRIANIMTHEME_BG_" + g_ActiveTheme.name;
+            std::string full = ThemesDir() + "/" + g_ActiveTheme.bg_texture_path;
+            g_ActiveTheme.bg_texture = APIDefs->Textures_GetOrCreateFromFile(id.c_str(), full.c_str());
+        }
+        if (g_ActiveTheme.bg_texture && g_ActiveTheme.bg_texture->Resource) {
+            ImVec2 bgMin = ImGui::GetWindowPos();
+            ImVec2 bgMax = ImVec2(bgMin.x + ImGui::GetWindowWidth(), bgMin.y + ImGui::GetWindowHeight());
+            dl->AddImage((ImTextureID)g_ActiveTheme.bg_texture->Resource, bgMin, bgMax);
+        }
+
+        // Chat area background overlay
+        if ((g_ActiveTheme.chat_bg_top | g_ActiveTheme.chat_bg_bot) & 0xFF000000u) {
+            ImVec2 bgMin = ImGui::GetWindowPos();
+            ImVec2 bgMax = ImVec2(bgMin.x + ImGui::GetWindowWidth(), bgMin.y + ImGui::GetWindowHeight());
+            dl->AddRectFilledMultiColor(bgMin, bgMax,
+                g_ActiveTheme.chat_bg_top, g_ActiveTheme.chat_bg_top,
+                g_ActiveTheme.chat_bg_bot, g_ActiveTheme.chat_bg_bot);
+        }
+
         ImFont* font = ImGui::GetFont();
         float fs = font->FontSize * g_FontScale;
         float areaWidth = ImGui::GetContentRegionAvail().x;
         float padding = 10.0f;
-        float bubbleRound = 10.0f;
+        float bubbleRound = g_ActiveTheme.bubble_rounding;
 
         // --- Bubble layout cache management ---
         bool cacheInvalid = (g_BubbleCache.contact != convo->contact);
@@ -2267,7 +2370,7 @@ static void RenderMessageArea() {
                 double& arrivalTime = g_MessageArrivalTimes[mapKey];
                 if (arrivalTime == 0.0) arrivalTime = ImGui::GetTime();
                 float elapsed = (float)(ImGui::GetTime() - arrivalTime);
-                msgAlpha = std::min(1.0f, elapsed / 0.15f);
+                msgAlpha = std::min(1.0f, elapsed / (g_ActiveTheme.fade_ms / 1000.0f));
             }
 
             // System/error messages — centered, distinct style
@@ -2294,11 +2397,16 @@ static void RenderMessageArea() {
             float bubbleX = is_self ? (cursor.x + areaWidth - layout.bubbleW - 8) : (cursor.x + 8);
 
             // Draw bubble
-            ImU32 bubbleCol = applyAlpha(is_self ? g_ActiveTheme.bubble_self : g_ActiveTheme.bubble_other, msgAlpha);
-            dl->AddRectFilled(
-                ImVec2(bubbleX, cursor.y),
-                ImVec2(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH),
-                bubbleCol, bubbleRound);
+            ImVec2 bubbleTL(bubbleX, cursor.y);
+            ImVec2 bubbleBR(bubbleX + layout.bubbleW, cursor.y + layout.bubbleH);
+            ImU32 topCol = applyAlpha(is_self ? g_ActiveTheme.bubble_self_top : g_ActiveTheme.bubble_other_top, msgAlpha);
+            ImU32 botCol = applyAlpha(is_self ? g_ActiveTheme.bubble_self_bot : g_ActiveTheme.bubble_other_bot, msgAlpha);
+            if (topCol == botCol) {
+                dl->AddRectFilled(bubbleTL, bubbleBR, topCol, bubbleRound);
+            } else {
+                // AddRectFilledMultiColor doesn't support rounding; gradient themes use sharp corners
+                dl->AddRectFilledMultiColor(bubbleTL, bubbleBR, topCol, topCol, botCol, botCol);
+            }
 
             // Failed message indicator: red border + red "!" to the left
             if (msg.failed) {
