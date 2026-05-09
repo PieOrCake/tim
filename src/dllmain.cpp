@@ -1438,6 +1438,41 @@ static void ApplyNamedTheme(const std::string& name) {
     }
 }
 
+// Derive TyrianIM-specific chat colors from the loaded ImGui style.
+// Called when a TOML file has no [chat] section (e.g. raw ImThemes themes).
+static void DeriveChatColorsFromStyle(TyrianTheme& t) {
+    const ImVec4* c = t.imgui_style.Colors;
+
+    auto toU32 = [](ImVec4 v) -> ImU32 {
+        return IM_COL32((int)(v.x * 255.f), (int)(v.y * 255.f),
+                        (int)(v.z * 255.f), (int)(v.w * 255.f));
+    };
+    auto clampW = [](ImVec4 v, float w) { v.w = w; return v; };
+
+    // Bubbles — self uses the header accent, other uses the frame background
+    t.bubble_self  = toU32(clampW(c[ImGuiCol_HeaderActive], 0.70f));
+    ImVec4 otherBg = c[ImGuiCol_FrameBg];
+    otherBg.w      = std::min(1.0f, otherBg.w + 0.25f);
+    t.bubble_other = toU32(otherBg);
+
+    // Chrome — map directly to ImGui equivalents
+    t.header_bg = toU32(c[ImGuiCol_TitleBg]);
+    t.active_bg = toU32(c[ImGuiCol_Header]);
+    t.input_bg  = toU32(c[ImGuiCol_FrameBg]);
+
+    // Accent color (CheckMark is the canonical accent in most themes)
+    ImVec4 accent = clampW(c[ImGuiCol_CheckMark], 1.0f);
+    t.avatar_bg  = toU32(accent);
+    t.pin_accent = toU32(accent);
+
+    // Text colors
+    t.sender_self  = clampW(c[ImGuiCol_SliderGrabActive], 1.0f);
+    t.sender_other = c[ImGuiCol_Text];
+    t.timestamp    = c[ImGuiCol_TextDisabled];
+
+    // Semantic colors (unread_dot, unread_label, status_*) keep their defaults
+}
+
 static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
     try {
         auto doc = toml::parse_file(path);
@@ -1580,6 +1615,8 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
         }
 
         // [chat] — TyrianIM-specific colors
+        // If no [chat] section, derive sensible colors from the loaded ImGui style
+        if (!nodeView("chat").as_table()) DeriveChatColorsFromStyle(t);
         if (auto* chat = nodeView("chat").as_table()) {
             auto readU32 = [&](const char* k, ImU32& v) {
                 auto* arr = (*chat)[k].as_array();
