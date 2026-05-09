@@ -1375,6 +1375,12 @@ static void RenderFloatingIcon() {
         flash_alpha = 0.5f + 0.5f * sinf(t * 2.0f * 3.14159f);
     }
 
+    float bobOffset = 0.0f;
+    if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        float bobT = (float)(now_ms % 2000) / 2000.0f;  // 0–1 over 2 seconds
+        bobOffset = sinf(bobT * 2.0f * 3.14159f) * 3.0f; // ±3 px vertical
+    }
+
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
         | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoFocusOnAppearing
         | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoBringToFrontOnFocus
@@ -1407,8 +1413,8 @@ static void RenderFloatingIcon() {
         g_FloatIconTexture = APIDefs->Textures_Get(TEX_FLOAT_ICON);
 
     // Image bounds — small margin inside the window
-    float bx0 = wp.x + 4.0f * s, by0 = wp.y + 4.0f * s;
-    float bx1 = wp.x + 56.0f * s, by1 = wp.y + 56.0f * s;
+    float bx0 = wp.x + 4.0f * s, by0 = wp.y + 4.0f * s + bobOffset;
+    float bx1 = wp.x + 56.0f * s, by1 = wp.y + 56.0f * s + bobOffset;
 
     if (g_FloatIconTexture && g_FloatIconTexture->Resource) {
         dl->AddImage((ImTextureID)g_FloatIconTexture->Resource,
