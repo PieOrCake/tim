@@ -720,7 +720,6 @@ static std::string g_DataDir;
 static bool g_ShowFloatingIcon = true;
 static float g_FloatingIconX = 100.0f;
 static float g_FloatingIconY = 100.0f;
-static bool g_FloatingIconPosInitialized = false;
 static bool g_FloatingIconLocked = true;
 static float g_FloatingIconScale = 1.0f;
 static bool g_FloatingIconOnlyOnUnread = false;
@@ -1285,7 +1284,6 @@ static void LoadSettings() {
                 if (!token.empty()) g_PinnedContactNames.push_back(token);
         }
     }
-    g_FloatingIconPosInitialized = true;
 }
 
 // --- GW2 theme (mirrors Alter Ego) ---
@@ -1883,10 +1881,9 @@ static void RenderFloatingIcon() {
         flags |= ImGuiWindowFlags_NoMove;
     }
 
-    if (!g_FloatingIconPosInitialized) {
-        ImGui::SetNextWindowPos(ImVec2(g_FloatingIconX, g_FloatingIconY + bobOffset), ImGuiCond_FirstUseEver);
-        g_FloatingIconPosInitialized = true;
-    }
+    // Apply bob every frame so the animation is visible.
+    // ImGuiCond_Always is used, so ImGui's built-in drag is disabled — we handle it manually below.
+    ImGui::SetNextWindowPos(ImVec2(g_FloatingIconX, g_FloatingIconY + bobOffset), ImGuiCond_Always);
 
     // Fully transparent window — bubble is drawn directly, no window background
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1901,6 +1898,15 @@ static void RenderFloatingIcon() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 wp = ImGui::GetWindowPos();
     ImFont* font = ImGui::GetFont();
+
+    // Manual drag (SetNextWindowPos_Always disables ImGui's built-in drag)
+    if (!g_FloatingIconLocked && ImGui::IsWindowHovered() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        ImVec2 delta = ImGui::GetIO().MouseDelta;
+        g_FloatingIconX += delta.x;
+        g_FloatingIconY += delta.y;
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            SaveSettings();
+    }
 
     // Resolve theme icon (if set)
     if (!g_ActiveTheme.icon_texture && !g_ActiveTheme.icon_texture_path.empty() && APIDefs) {
