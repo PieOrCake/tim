@@ -136,6 +136,7 @@ void ChatManager::MarkLastOutgoingFailed(const std::string& contact) {
 void ChatManager::DeleteConversation(const std::string& contact) {
     std::lock_guard<std::mutex> lock(s_Mutex);
     s_Conversations.erase(contact);
+    s_PinnedContacts.erase(contact);
     s_SortDirty = true;
     // Delete the history file
     std::string path = ContactFilePath(contact);

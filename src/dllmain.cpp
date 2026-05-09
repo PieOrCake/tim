@@ -1179,6 +1179,7 @@ static void SaveSettings() {
     f << "show_qa_icon=" << (g_ShowQAIcon ? 1 : 0) << "\n";
     f << "send_delay=" << g_SendDelay << "\n";
     auto pinned = TyrianIM::ChatManager::GetPinnedContacts();
+    std::sort(pinned.begin(), pinned.end());
     if (!pinned.empty()) {
         std::string joined;
         for (size_t i = 0; i < pinned.size(); i++) {
