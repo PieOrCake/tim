@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
+#include <memory>
 #include <mutex>
 #include <cstdint>
 #include <ctime>
@@ -39,6 +41,7 @@ struct Conversation {
     std::vector<ChatMessage> messages;
     uint64_t last_activity;     // epoch_ms of last message
     int unread_count;
+    bool pinned = false;
 };
 
 class ChatManager {
@@ -50,7 +53,7 @@ public:
     static void AddMessage(const ChatMessage& msg);
 
     // Get all conversations sorted by last activity (most recent first)
-    static std::vector<const Conversation*> GetConversations();
+    static std::vector<Conversation*> GetConversations();
 
     // Get a specific conversation by contact name
     static Conversation* GetConversation(const std::string& contact);
@@ -60,6 +63,9 @@ public:
 
     // Get total unread count across all conversations
     static int GetTotalUnreadCount();
+
+    // Get number of conversations with at least one unread message
+    static int GetUnreadContactCount();
 
     // Mark the last outgoing message to a contact as failed
     static void MarkLastOutgoingFailed(const std::string& contact);
@@ -73,20 +79,31 @@ public:
 
     // Set the local player's account name
     static void SetSelfAccountName(const std::string& name);
-    static const std::string& GetSelfAccountName();
+    static std::string GetSelfAccountName();
+
+    // Update the display name (character name) for a contact, thread-safe
+    static void SetDisplayName(const std::string& contact, const std::string& display_name);
+
+    // Pin management
+    static void SetPinnedContacts(const std::vector<std::string>& contacts);
+    static std::vector<std::string> GetPinnedContacts();
+    static void TogglePin(const std::string& contact);
+    static bool IsPinned(const std::string& contact);
 
     // Persistence
     static void SaveHistory();
     static void LoadHistory();
 
 private:
-    static std::unordered_map<std::string, Conversation> s_Conversations;
+    static std::unordered_map<std::string, std::unique_ptr<Conversation>> s_Conversations;
     static std::string s_SelfAccountName;
     static std::string s_DataDir;
     static std::mutex s_Mutex;
+    static std::unordered_set<std::string> s_PinnedContacts;
 
     // Cached sorted conversation list — rebuilt only when dirty
-    static std::vector<const Conversation*> s_SortedCache;
+    // Pointers into unique_ptr values: stable through map rehash
+    static std::vector<Conversation*> s_SortedCache;
     static bool s_SortDirty;
 
     // Resolve the contact name from a message (the "other party")
