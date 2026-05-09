@@ -1899,24 +1899,27 @@ static void RenderFloatingIcon() {
     ImVec2 wp = ImGui::GetWindowPos();
     ImFont* font = ImGui::GetFont();
 
-    // Manual drag (SetNextWindowPos_Always disables ImGui's built-in drag).
-    // Use a latched flag so the drag only starts when the user clicks THIS window,
-    // not whenever any left mouse button event fires in-game.
-    static bool s_DraggingIcon = false;
-    if (!g_FloatingIconLocked) {
-        if (!s_DraggingIcon && ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-            s_DraggingIcon = true;
-        if (s_DraggingIcon) {
-            if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                ImVec2 delta = ImGui::GetIO().MouseDelta;
-                g_FloatingIconX += delta.x;
-                g_FloatingIconY += delta.y;
-            } else {
-                s_DraggingIcon = false;
-                SaveSettings();
-            }
+    // Invisible button over the full icon — owns the input via ImGui's item system,
+    // which reliably distinguishes click from drag.
+    ImGui::SetCursorPos(ImVec2(0, 0));
+    ImGui::InvisibleButton("##FloatIconBtn", ImGui::GetWindowSize());
+
+    static bool s_IconWasDragged = false;
+
+    if (!g_FloatingIconLocked && ImGui::IsItemActive()) {
+        ImVec2 delta = ImGui::GetIO().MouseDelta;
+        if (delta.x != 0.0f || delta.y != 0.0f) {
+            g_FloatingIconX += delta.x;
+            g_FloatingIconY += delta.y;
+            s_IconWasDragged = true;
         }
     }
+
+    if (ImGui::IsItemDeactivated()) {
+        if (s_IconWasDragged) {
+            SaveSettings();
+        } else {
+            // Pure click — toggle main window and navigate to unread
 
     // Resolve theme icon (if set)
     if (!g_ActiveTheme.icon_texture && !g_ActiveTheme.icon_texture_path.empty() && APIDefs) {
@@ -1968,29 +1971,21 @@ static void RenderFloatingIcon() {
             ImGui::ColorConvertFloat4ToU32(g_ActiveTheme.unread_label), badgeBuf);
     }
 
-    // Click to toggle main window
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        g_WindowVisible = !g_WindowVisible;
-        if (g_WindowVisible) {
-            g_ScrollToBottom = true;
-            // Navigate to the most recently active unread conversation
-            if (unread_contact_count > 0) {
-                for (auto* c : TyrianIM::ChatManager::GetConversations()) {
-                    if (c->unread_count > 0) {
-                        g_SelectedContact = c->contact;
-                        g_FocusInput = true;
-                        break;
+            g_WindowVisible = !g_WindowVisible;
+            if (g_WindowVisible) {
+                g_ScrollToBottom = true;
+                if (unread_contact_count > 0) {
+                    for (auto* c : TyrianIM::ChatManager::GetConversations()) {
+                        if (c->unread_count > 0) {
+                            g_SelectedContact = c->contact;
+                            g_FocusInput = true;
+                            break;
+                        }
                     }
                 }
             }
         }
-    }
-
-    // Save position if dragged
-    ImVec2 pos = ImGui::GetWindowPos();
-    if (pos.x != g_FloatingIconX || pos.y != g_FloatingIconY) {
-        g_FloatingIconX = pos.x;
-        g_FloatingIconY = pos.y;
+        s_IconWasDragged = false;
     }
 
     ImGui::End();
