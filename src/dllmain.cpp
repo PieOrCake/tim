@@ -1955,20 +1955,25 @@ static void RenderFloatingIcon() {
     float bx0 = wp.x + 4.0f * s, by0 = wp.y + 4.0f * s;
     float bx1 = wp.x + 56.0f * s, by1 = wp.y + 56.0f * s;
 
+    // Compute tint: white when idle, blends toward accent colour when flashing.
+    // AddImage multiplies each pixel by the tint, so transparent PNG areas stay
+    // transparent — the flash naturally follows the icon's exact shape.
+    ImVec4 accent = ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.unread_dot);
+    ImVec4 tint(
+        1.0f - flash_alpha * 0.6f * (1.0f - accent.x),
+        1.0f - flash_alpha * 0.6f * (1.0f - accent.y),
+        1.0f - flash_alpha * 0.6f * (1.0f - accent.z),
+        1.0f);
+
     if (activeIcon && activeIcon->Resource) {
         dl->AddImage((ImTextureID)activeIcon->Resource,
-                     ImVec2(bx0, by0), ImVec2(bx1, by1));
+                     ImVec2(bx0, by0), ImVec2(bx1, by1),
+                     ImVec2(0, 0), ImVec2(1, 1),
+                     ImGui::ColorConvertFloat4ToU32(tint));
     } else {
         // Fallback until texture loads
         dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1),
                           g_ActiveTheme.bubble_self, 8.0f * s);
-    }
-
-    // Pulsing overlay when flashing (unread messages)
-    if (is_flashing) {
-        ImDrawList* fdl = ImGui::GetForegroundDrawList();
-        fdl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1),
-                           (g_ActiveTheme.bubble_self & 0x00FFFFFFu) | ((ImU32)((g_ActiveTheme.bubble_self >> 24) * flash_alpha * 0.35f) << 24), 8.0f * s);
     }
 
     // Unread contact count badge
