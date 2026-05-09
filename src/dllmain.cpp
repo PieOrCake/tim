@@ -1868,7 +1868,7 @@ static void RenderFloatingIcon() {
     }
 
     float bobOffset = 0.0f;
-    if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    if (is_flashing) {
         float bobT = (float)(now_ms % (uint64_t)g_ActiveTheme.bob_period_ms) / g_ActiveTheme.bob_period_ms;
         bobOffset = sinf(bobT * 2.0f * 3.14159f) * g_ActiveTheme.bob_amplitude;
     }
