@@ -1080,7 +1080,7 @@ static std::string FormatDisplayTime(uint64_t epoch_ms) {
     }
 
     char buf[40];
-    strftime(buf, sizeof(buf), "%A, %d %b %y @ %H:%M", &msg_tm);
+    strftime(buf, sizeof(buf), "%a, %d %b %y @ %H:%M", &msg_tm);
     return std::string(buf);
 }
 
