@@ -880,6 +880,11 @@ struct TyrianTheme {
     // Per-theme floating icon (TOML themes: filename relative to themes/ dir)
     std::string    icon_texture_path;
     Texture_t*     icon_texture = nullptr;
+    // Custom draw hooks for compiled-in themes (nullptr = skip)
+    // Called with the panel's draw list and (min, max) screen coords
+    using DrawHook = void(*)(ImDrawList*, ImVec2, ImVec2);
+    DrawHook draw_chat_bg     = nullptr;  // behind messages
+    DrawHook draw_contacts_bg = nullptr;  // behind contact list
     // ImVec4 chat colors ([R,G,B,A] 0-1 floats)
     ImVec4 sender_self  = {0.4f, 0.8f, 1.0f, 1.0f};
     ImVec4 sender_other = {0.9f, 0.7f, 0.3f, 1.0f};
@@ -1643,6 +1648,183 @@ static std::optional<TyrianTheme> LoadThemeFromTOML(const std::string& path) {
     }
 }
 
+// ── Asuran Lab draw hooks ─────────────────────────────────────────────────────
+
+static void AsuranLabDrawGrid(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float gridSize,
+                               ImU32 colFaint, ImU32 colBright) {
+    // Faint grid lines aligned to grid coordinates (stable as window scrolls)
+    for (float x = mn.x - fmodf(mn.x, gridSize); x < mx.x; x += gridSize)
+        dl->AddLine(ImVec2(x, mn.y), ImVec2(x, mx.y), colFaint, 0.5f);
+    for (float y = mn.y - fmodf(mn.y, gridSize); y < mx.y; y += gridSize)
+        dl->AddLine(ImVec2(mn.x, y), ImVec2(mx.x, y), colFaint, 0.5f);
+
+    // Every 4th line slightly brighter
+    float bigGrid = gridSize * 4.0f;
+    for (float x = mn.x - fmodf(mn.x, bigGrid); x < mx.x; x += bigGrid)
+        dl->AddLine(ImVec2(x, mn.y), ImVec2(x, mx.y), colBright, 0.5f);
+    for (float y = mn.y - fmodf(mn.y, bigGrid); y < mx.y; y += bigGrid)
+        dl->AddLine(ImVec2(mn.x, y), ImVec2(mx.x, y), colBright, 0.5f);
+}
+
+static void AsuranLabChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+
+    // Grid
+    AsuranLabDrawGrid(dl, mn, mx, 24.0f,
+        IM_COL32(0, 170, 230, 14), IM_COL32(0, 200, 255, 28));
+
+    // Animated horizontal scan line descending continuously
+    float scanT = (float)fmod(ImGui::GetTime() * 0.25, 1.0);
+    float scanY = mn.y + scanT * h;
+    ImU32 scanA = IM_COL32(0, 220, 255, 45);
+    ImU32 scanFade = IM_COL32(0, 220, 255, 0);
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, scanY - 18.0f), ImVec2(mx.x, scanY),
+        scanFade, scanFade, scanA, scanA);
+    dl->AddLine(ImVec2(mn.x, scanY), ImVec2(mx.x, scanY), IM_COL32(0, 230, 255, 70), 1.0f);
+
+    // Secondary faster pulse line
+    float pulseT = (float)fmod(ImGui::GetTime() * 0.7 + 0.4, 1.0);
+    float pulseY = mn.y + pulseT * h;
+    dl->AddLine(ImVec2(mn.x, pulseY), ImVec2(mx.x, pulseY), IM_COL32(180, 80, 255, 22), 0.5f);
+
+    // Corner circuit traces — top-left
+    float cr = 18.0f;
+    ImU32 trace = IM_COL32(0, 200, 255, 55);
+    dl->AddLine(ImVec2(mn.x + cr, mn.y + 6),  ImVec2(mn.x + cr + 40, mn.y + 6),  trace, 1.0f);
+    dl->AddLine(ImVec2(mn.x + cr + 40, mn.y + 6), ImVec2(mn.x + cr + 40, mn.y + 18), trace, 1.0f);
+    dl->AddCircleFilled(ImVec2(mn.x + cr + 40, mn.y + 18), 2.5f, IM_COL32(0, 220, 255, 120));
+
+    // Bottom-right corner trace
+    dl->AddLine(ImVec2(mx.x - cr, mx.y - 6),  ImVec2(mx.x - cr - 40, mx.y - 6),  trace, 1.0f);
+    dl->AddLine(ImVec2(mx.x - cr - 40, mx.y - 6), ImVec2(mx.x - cr - 40, mx.y - 18), trace, 1.0f);
+    dl->AddCircleFilled(ImVec2(mx.x - cr - 40, mx.y - 18), 2.5f, IM_COL32(0, 220, 255, 120));
+
+    // Subtle vignette (darker edges)
+    float vw = w * 0.12f;
+    dl->AddRectFilledMultiColor(mn, ImVec2(mn.x + vw, mx.y),
+        IM_COL32(0,0,0,55), IM_COL32(0,0,0,0), IM_COL32(0,0,0,0), IM_COL32(0,0,0,55));
+    dl->AddRectFilledMultiColor(ImVec2(mx.x - vw, mn.y), mx,
+        IM_COL32(0,0,0,0), IM_COL32(0,0,0,55), IM_COL32(0,0,0,55), IM_COL32(0,0,0,0));
+}
+
+static void AsuranLabContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    // Sparser grid for the narrower contacts panel
+    AsuranLabDrawGrid(dl, mn, mx, 24.0f,
+        IM_COL32(0, 140, 200, 10), IM_COL32(0, 170, 230, 20));
+
+    // Single slow scan line
+    float t = (float)fmod(ImGui::GetTime() * 0.18, 1.0);
+    float y = mn.y + t * (mx.y - mn.y);
+    dl->AddLine(ImVec2(mn.x, y), ImVec2(mx.x, y), IM_COL32(0, 200, 255, 30), 0.8f);
+}
+
+static TyrianTheme BuildAsuranLabTheme() {
+    TyrianTheme t;
+    t.name        = "Asuran Lab";
+    t.description = "High-tech holographic display with animated grid and circuit traces";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();  // start from GW2 metrics (rounding, padding)
+
+    // Override all colors to electric cyan/purple on near-black
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.03f, 0.03f, 0.06f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.03f, 0.03f, 0.06f, 0.80f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.05f, 0.05f, 0.10f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.00f, 0.65f, 0.90f, 0.35f);
+    c[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.00f, 0.18f, 0.28f, 0.60f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.00f, 0.28f, 0.42f, 0.75f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.00f, 0.40f, 0.58f, 0.85f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.02f, 0.04f, 0.09f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.00f, 0.22f, 0.36f, 1.00f);
+    c[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.02f, 0.04f, 0.08f, 0.75f);
+    c[ImGuiCol_MenuBarBg]            = ImVec4(0.02f, 0.05f, 0.10f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.02f, 0.03f, 0.06f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.00f, 0.50f, 0.72f, 0.70f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.00f, 0.65f, 0.88f, 0.85f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.00f, 0.80f, 1.00f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.00f, 0.72f, 0.90f, 1.00f);
+    c[ImGuiCol_SliderGrabActive]     = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
+    c[ImGuiCol_Button]               = ImVec4(0.00f, 0.28f, 0.42f, 0.75f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.00f, 0.48f, 0.68f, 0.85f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.00f, 0.65f, 0.88f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.00f, 0.35f, 0.55f, 0.60f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.00f, 0.50f, 0.72f, 0.75f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.00f, 0.65f, 0.88f, 0.85f);
+    c[ImGuiCol_Separator]            = ImVec4(0.00f, 0.50f, 0.72f, 0.35f);
+    c[ImGuiCol_SeparatorHovered]     = ImVec4(0.00f, 0.70f, 0.92f, 0.60f);
+    c[ImGuiCol_SeparatorActive]      = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.00f, 0.55f, 0.78f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.00f, 0.72f, 0.92f, 0.60f);
+    c[ImGuiCol_ResizeGripActive]     = ImVec4(0.00f, 0.90f, 1.00f, 0.90f);
+    c[ImGuiCol_Tab]                  = ImVec4(0.02f, 0.10f, 0.18f, 0.86f);
+    c[ImGuiCol_TabHovered]           = ImVec4(0.00f, 0.48f, 0.68f, 0.90f);
+    c[ImGuiCol_TabActive]            = ImVec4(0.00f, 0.35f, 0.55f, 1.00f);
+    c[ImGuiCol_TabUnfocused]         = ImVec4(0.02f, 0.06f, 0.10f, 0.97f);
+    c[ImGuiCol_TabUnfocusedActive]   = ImVec4(0.02f, 0.18f, 0.28f, 1.00f);
+    c[ImGuiCol_Text]                 = ImVec4(0.82f, 0.95f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.28f, 0.50f, 0.60f, 1.00f);
+    c[ImGuiCol_NavHighlight]         = ImVec4(0.00f, 0.82f, 1.00f, 1.00f);
+    c[ImGuiCol_PlotHistogram]        = ImVec4(0.00f, 0.82f, 1.00f, 1.00f);
+    c[ImGuiCol_PlotHistogramHovered] = ImVec4(0.20f, 0.92f, 1.00f, 1.00f);
+    c[ImGuiCol_TableHeaderBg]        = ImVec4(0.02f, 0.10f, 0.18f, 1.00f);
+    c[ImGuiCol_TableBorderStrong]    = ImVec4(0.00f, 0.45f, 0.65f, 0.60f);
+    c[ImGuiCol_TableBorderLight]     = ImVec4(0.00f, 0.30f, 0.45f, 0.40f);
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.02f, 0.05f, 0.65f);
+
+    // Sharp corners — lab equipment aesthetic
+    s.WindowRounding    = 2.0f;
+    s.ChildRounding     = 2.0f;
+    s.FrameRounding     = 2.0f;
+    s.PopupRounding     = 2.0f;
+    s.ScrollbarRounding = 2.0f;
+    s.GrabRounding      = 1.0f;
+    s.TabRounding       = 2.0f;
+
+    // Chat colors — deep teal/cyan palette
+    t.bubble_self     = IM_COL32(  0,  55,  85, 225);
+    t.bubble_self_top = IM_COL32(  0,  72, 108, 230);
+    t.bubble_self_bot = IM_COL32(  0,  36,  58, 240);
+    t.bubble_other    = IM_COL32( 18,  20,  36, 225);
+    t.bubble_other_top= IM_COL32( 24,  26,  46, 230);
+    t.bubble_other_bot= IM_COL32( 10,  12,  24, 240);
+    t.bubble_rounding = 2.0f;
+
+    t.header_bg    = IM_COL32(  2,   8,  18, 245);
+    t.active_bg    = IM_COL32(  0,  55,  85, 180);
+    t.input_bg     = IM_COL32(  0,  18,  30, 230);
+    t.avatar_bg    = IM_COL32(  0, 165, 215, 255);
+    t.unread_dot   = IM_COL32(220,  40,  40, 255);
+    t.pin_accent   = IM_COL32(  0, 210, 255, 255);
+
+    t.sender_self   = ImVec4(0.00f, 0.88f, 1.00f, 1.0f);
+    t.sender_other  = ImVec4(0.55f, 0.82f, 0.95f, 1.0f);
+    t.timestamp     = ImVec4(0.25f, 0.48f, 0.60f, 1.0f);
+    t.unread_label  = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+    t.status_ok     = ImVec4(0.10f, 0.92f, 0.65f, 1.0f);
+    t.status_warn   = ImVec4(1.00f, 0.80f, 0.00f, 1.0f);
+    t.status_err    = ImVec4(1.00f, 0.30f, 0.30f, 1.0f);
+
+    // Subtle blue tint at bottom of chat area (depth effect)
+    t.chat_bg_top = IM_COL32(0, 0, 0, 0);
+    t.chat_bg_bot = IM_COL32(0, 30, 50, 25);
+
+    // Animation — snappy/urgent like a system alert
+    t.bob_amplitude   = 5.0f;
+    t.bob_period_ms   = 1200.0f;
+    t.flash_period_ms = 500.0f;
+    t.fade_ms         = 80.0f;
+
+    // Draw hooks
+    t.draw_chat_bg     = AsuranLabChatBg;
+    t.draw_contacts_bg = AsuranLabContactsBg;
+
+    return t;
+}
+
 static TyrianTheme BuildNexusTheme() {
     TyrianTheme t;
     t.name          = "Nexus";
@@ -1660,6 +1842,7 @@ static const ThemeBuilder kBuiltinThemes[] = {
     BuildNexusTheme,
     BuildGW2DarkTheme,
     BuildCharrSteelTheme,
+    BuildAsuranLabTheme,
 };
 
 static void ScanThemes() {
@@ -1846,6 +2029,13 @@ void AddonOptions();
 
 static void RenderContactList(float width) {
     ImGui::BeginChild("##Contacts", ImVec2(width, 0), true);
+
+    if (g_ActiveTheme.draw_contacts_bg) {
+        ImDrawList* cdl = ImGui::GetWindowDrawList();
+        ImVec2 cMin = ImGui::GetWindowPos();
+        ImVec2 cMax = ImVec2(cMin.x + ImGui::GetWindowWidth(), cMin.y + ImGui::GetWindowHeight());
+        g_ActiveTheme.draw_contacts_bg(cdl, cMin, cMax);
+    }
 
     ImFont* font = ImGui::GetFont();
     float fs = font->FontSize * g_FontScale;
@@ -2156,6 +2346,13 @@ static void RenderMessageArea() {
             dl->AddRectFilledMultiColor(bgMin, bgMax,
                 g_ActiveTheme.chat_bg_top, g_ActiveTheme.chat_bg_top,
                 g_ActiveTheme.chat_bg_bot, g_ActiveTheme.chat_bg_bot);
+        }
+
+        // Theme draw hook (compiled-in themes: custom patterns/lines/effects)
+        if (g_ActiveTheme.draw_chat_bg) {
+            ImVec2 bgMin = ImGui::GetWindowPos();
+            ImVec2 bgMax = ImVec2(bgMin.x + ImGui::GetWindowWidth(), bgMin.y + ImGui::GetWindowHeight());
+            g_ActiveTheme.draw_chat_bg(dl, bgMin, bgMax);
         }
 
         ImFont* font = ImGui::GetFont();
