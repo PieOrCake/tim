@@ -1509,7 +1509,24 @@ static void RenderContactList(float width) {
         if (firstItemIsPinned && !separatorDrawn && !convo->pinned) {
             separatorDrawn = true;
             ImGui::Spacing();
-            ImGui::Separator();
+            {
+                ImVec2 cp = ImGui::GetCursorScreenPos();
+                float labelFs = font->FontSize * (g_FontScale * 0.72f);
+                const char* label = "PINNED";
+                ImVec2 labelSize = font->CalcTextSizeA(labelFs, FLT_MAX, 0.0f, label);
+                float avail = ImGui::GetContentRegionAvail().x;
+                float lineY = cp.y + labelFs * 0.5f;
+                float labelX = cp.x + (avail - labelSize.x) * 0.5f;
+                ImU32 lineColor = IM_COL32(212, 175, 55, 100);
+                float gap = 6.0f;
+                dl->AddLine(ImVec2(cp.x + 4, lineY),
+                            ImVec2(labelX - gap, lineY), lineColor, 1.0f);
+                dl->AddText(font, labelFs, ImVec2(labelX, cp.y),
+                            IM_COL32(212, 175, 55, 160), label);
+                dl->AddLine(ImVec2(labelX + labelSize.x + gap, lineY),
+                            ImVec2(cp.x + avail - 4, lineY), lineColor, 1.0f);
+                ImGui::Dummy(ImVec2(avail, labelFs + 4.0f));
+            }
             ImGui::Spacing();
         }
 
@@ -1523,6 +1540,13 @@ static void RenderContactList(float width) {
                 ImVec2(cursor.x, cursor.y),
                 ImVec2(cursor.x + width - 16, cursor.y + itemHeight),
                 COLOR_ACTIVE_BG, 6.0f);
+        }
+
+        if (convo->pinned) {
+            dl->AddRectFilled(
+                ImVec2(cursor.x + 2, cursor.y + 3),
+                ImVec2(cursor.x + 4, cursor.y + itemHeight - 3),
+                IM_COL32(212, 175, 55, 200));
         }
 
         if (ImGui::Selectable(("##contact_" + convo->contact).c_str(), false, 0, ImVec2(0, itemHeight))) {
@@ -1580,6 +1604,15 @@ static void RenderContactList(float width) {
         avatarColor.w = 1.0f;
         dl->AddCircleFilled(avatarCenter, avatarRadius, ImGui::ColorConvertFloat4ToU32(avatarColor));
 
+        {
+            ImVec4 ringColor;
+            ImGui::ColorConvertHSVtoRGB(hue, 0.9f, 1.0f, ringColor.x, ringColor.y, ringColor.z);
+            ringColor.w = 1.0f;
+            float ringRadius = std::min(avatarRadius + 2.0f, itemHeight * 0.5f - 1.0f);
+            dl->AddCircle(avatarCenter, ringRadius,
+                          ImGui::ColorConvertFloat4ToU32(ringColor), 32, 1.5f);
+        }
+
         // Initial letter (scaled)
         char initial[2] = { 0, 0 };
         std::string displayStr = !convo->display_name.empty() ? convo->display_name : convo->contact;
@@ -1611,15 +1644,6 @@ static void RenderContactList(float width) {
                 IM_COL32(255, 255, 255, 255), unreadBuf);
         }
 
-        if (convo->pinned) {
-            const char* pinLabel = "[P]";
-            float pinFs = fs * 0.72f;
-            ImVec2 pinSize = font->CalcTextSizeA(pinFs, FLT_MAX, 0.0f, pinLabel);
-            float pinX = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x - 4.0f - pinSize.x;
-            float pinY = cursor.y + (itemHeight - pinSize.y) * 0.5f;
-            dl->AddText(font, pinFs, ImVec2(pinX, pinY),
-                IM_COL32(212, 175, 55, 220), pinLabel);
-        }
 
         // Subtitle
         if (!convo->display_name.empty() && convo->display_name != convo->contact) {
