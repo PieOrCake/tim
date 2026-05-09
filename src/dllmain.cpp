@@ -1511,33 +1511,7 @@ static void RenderContactList(float width) {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    bool separatorDrawn = false;
-    bool firstItemIsPinned = !conversations.empty() && conversations[0]->pinned;
-
     for (const auto* convo : conversations) {
-        if (firstItemIsPinned && !separatorDrawn && !convo->pinned) {
-            separatorDrawn = true;
-            ImGui::Spacing();
-            {
-                ImVec2 cp = ImGui::GetCursorScreenPos();
-                float labelFs = font->FontSize * (g_FontScale * 0.72f);
-                const char* label = "PINNED";
-                ImVec2 labelSize = font->CalcTextSizeA(labelFs, FLT_MAX, 0.0f, label);
-                float avail = ImGui::GetContentRegionAvail().x;
-                float lineY = cp.y + labelFs * 0.5f;
-                float labelX = cp.x + (avail - labelSize.x) * 0.5f;
-                ImU32 lineColor = IM_COL32(212, 175, 55, 100);
-                float gap = 6.0f;
-                dl->AddLine(ImVec2(cp.x + 4, lineY),
-                            ImVec2(labelX - gap, lineY), lineColor, 1.0f);
-                dl->AddText(font, labelFs, ImVec2(labelX, cp.y),
-                            IM_COL32(212, 175, 55, 160), label);
-                dl->AddLine(ImVec2(labelX + labelSize.x + gap, lineY),
-                            ImVec2(cp.x + avail - 4, lineY), lineColor, 1.0f);
-                ImGui::Dummy(ImVec2(avail, labelFs + 4.0f));
-            }
-            ImGui::Spacing();
-        }
 
         bool is_selected = (g_SelectedContact == convo->contact);
 
