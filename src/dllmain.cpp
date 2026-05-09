@@ -1796,7 +1796,7 @@ static void RenderFloatingIcon() {
     // Compute tint: white when idle, blends toward accent colour when flashing.
     // AddImage multiplies each pixel by the tint, so transparent PNG areas stay
     // transparent — the flash naturally follows the icon's exact shape.
-    ImVec4 accent = ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.unread_dot);
+    ImVec4 accent = ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.pin_accent);
     ImVec4 tint(
         1.0f - flash_alpha * 0.6f * (1.0f - accent.x),
         1.0f - flash_alpha * 0.6f * (1.0f - accent.y),
