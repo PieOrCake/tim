@@ -17,9 +17,21 @@ LAST=$(( FRAME_COUNT - 1 ))
 LAST_PADDED=$(printf "%02d" "$LAST")
 
 for i in $(seq -w 0 "$LAST_PADDED"); do
-    magick "$BUILDDIR/nyan_frame_raw_${i}.png" \
-        -fuzz 18% -transparent "#042957" \
-        "$BUILDDIR/nyan_frame_${i}.png"
+    python3 - "$BUILDDIR/nyan_frame_raw_${i}.png" "$BUILDDIR/nyan_frame_${i}.png" <<'PYEOF'
+import sys
+from PIL import Image
+src, dst = sys.argv[1], sys.argv[2]
+img = Image.open(src).convert('RGBA')
+px = img.load()
+bg = (4, 41, 87)
+fuzz = 46  # ~18% of 255*3
+for y in range(img.height):
+    for x in range(img.width):
+        r, g, b, a = px[x, y]
+        if abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) < fuzz:
+            px[x, y] = (r, g, b, 0)
+img.save(dst)
+PYEOF
 done
 
 TMPFILE=$(mktemp)
