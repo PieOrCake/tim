@@ -5,6 +5,9 @@ build/
 CLAUDE.md
 handover.md
 
+# Visual companion sessions
+.superpowers/
+
 # IDE
 .vscode/
 .idea/
