@@ -51,16 +51,16 @@ set(HEADERS
     src/GW2API.h
 )
 
-# Generate Nyan Cat frame data from GIF at build time
+# Pack pre-edited Nyan Cat frames into a C header at build time
+file(GLOB NYAN_FRAME_PNGS "${CMAKE_SOURCE_DIR}/assets/nyan/nyan_frame_*.png")
 add_custom_command(
     OUTPUT  ${CMAKE_SOURCE_DIR}/src/nyancat_frames.h
     COMMAND bash ${CMAKE_SOURCE_DIR}/cmake/gen_nyan_frames.sh
-            ${CMAKE_SOURCE_DIR}/nyan-cat.gif
-            ${CMAKE_BINARY_DIR}
+            ${CMAKE_SOURCE_DIR}/assets/nyan
             ${CMAKE_SOURCE_DIR}/src/nyancat_frames.h
-    DEPENDS ${CMAKE_SOURCE_DIR}/nyan-cat.gif
+    DEPENDS ${NYAN_FRAME_PNGS}
             ${CMAKE_SOURCE_DIR}/cmake/gen_nyan_frames.sh
-    COMMENT "Generating src/nyancat_frames.h from nyan-cat.gif"
+    COMMENT "Generating src/nyancat_frames.h from assets/nyan/"
     VERBATIM
 )
 add_custom_target(nyancat_frames_h

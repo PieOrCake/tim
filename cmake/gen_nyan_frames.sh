@@ -1,38 +1,15 @@
 #!/usr/bin/env bash
-# Usage: gen_nyan_frames.sh <gif> <builddir> <outfile>
+# Usage: gen_nyan_frames.sh <assets_dir> <outfile>
+# Packs pre-edited RGBA PNGs from assets_dir into a C header.
 set -e
 
-[ $# -eq 3 ] || { echo "Usage: $0 <gif> <builddir> <outfile>" >&2; exit 1; }
+[ $# -eq 2 ] || { echo "Usage: $0 <assets_dir> <outfile>" >&2; exit 1; }
 
-GIF="$1"
-BUILDDIR="$2"
-OUTFILE="$3"
+ASSETSDIR="$1"
+OUTFILE="$2"
 
-FRAME_COUNT=$(identify -format '%n\n' "$GIF" | head -1)
-
-# Split all GIF frames (coalesced), then remove the blue sky background
-magick "$GIF" -coalesce +adjoin "$BUILDDIR/nyan_frame_raw_%02d.png"
-
-LAST=$(( FRAME_COUNT - 1 ))
-LAST_PADDED=$(printf "%02d" "$LAST")
-
-for i in $(seq -w 0 "$LAST_PADDED"); do
-    python3 - "$BUILDDIR/nyan_frame_raw_${i}.png" "$BUILDDIR/nyan_frame_${i}.png" <<'PYEOF'
-import sys
-from PIL import Image
-src, dst = sys.argv[1], sys.argv[2]
-img = Image.open(src).convert('RGBA')
-px = img.load()
-bg = (4, 41, 87)
-fuzz = 46  # ~18% of 255*3
-for y in range(img.height):
-    for x in range(img.width):
-        r, g, b, a = px[x, y]
-        if abs(r - bg[0]) + abs(g - bg[1]) + abs(b - bg[2]) < fuzz:
-            px[x, y] = (r, g, b, 0)
-img.save(dst)
-PYEOF
-done
+FRAMES=("$ASSETSDIR"/nyan_frame_[0-9][0-9].png)
+FRAME_COUNT=${#FRAMES[@]}
 
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
@@ -42,22 +19,25 @@ trap 'rm -f "$TMPFILE"' EXIT
     echo "#define NYAN_FRAME_COUNT ${FRAME_COUNT}"
     echo ""
 
-    for i in $(seq -w 0 "$LAST_PADDED"); do
-        xxd -i "$BUILDDIR/nyan_frame_${i}.png" \
-            | sed "s/unsigned char .*\[\]/static const unsigned char kNyanFrame${i}[]/" \
-            | sed "s/unsigned int .*_len/static const unsigned int kNyanFrame${i}Len/"
+    i=0
+    for f in "${FRAMES[@]}"; do
+        TAG=$(printf "%02d" "$i")
+        xxd -i "$f" \
+            | sed "s/unsigned char .*\[\]/static const unsigned char kNyanFrame${TAG}[]/" \
+            | sed "s/unsigned int .*_len/static const unsigned int kNyanFrame${TAG}Len/"
         echo ""
+        i=$(( i + 1 ))
     done
 
     echo "static const unsigned char* const kNyanFrameData[${FRAME_COUNT}] = {"
-    for i in $(seq -w 0 "$LAST_PADDED"); do
-        echo "    kNyanFrame${i},"
+    for j in $(seq 0 $(( FRAME_COUNT - 1 ))); do
+        echo "    kNyanFrame$(printf "%02d" "$j"),"
     done
     echo "};"
     echo ""
     echo "static const unsigned int kNyanFrameSize[${FRAME_COUNT}] = {"
-    for i in $(seq -w 0 "$LAST_PADDED"); do
-        echo "    kNyanFrame${i}Len,"
+    for j in $(seq 0 $(( FRAME_COUNT - 1 ))); do
+        echo "    kNyanFrame$(printf "%02d" "$j")Len,"
     done
     echo "};"
 } > "$TMPFILE" && mv "$TMPFILE" "$OUTFILE"
