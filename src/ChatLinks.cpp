@@ -294,6 +294,9 @@ std::vector<Segment> ParseSegments(const std::string& text) {
         if (is_http || is_https) {
             size_t j = i;
             while (j < text.size() && !std::isspace((unsigned char)text[j])) j++;
+            // Cap URL length to avoid oversized segments from malformed input
+            constexpr size_t kMaxUrlLen = 2048;
+            if (j - i > kMaxUrlLen) { plain += text[i++]; continue; }
             std::string url = text.substr(i, j - i);
             size_t proto_end = url.find("://");
             std::string domain;
@@ -305,6 +308,8 @@ std::vector<Segment> ParseSegments(const std::string& text) {
             } else {
                 domain = url;
             }
+            // Fall back to plain text if domain is empty (malformed URL like http:///path)
+            if (domain.empty()) { plain += text[i++]; continue; }
             LinkSegment seg;
             seg.type         = GW2LinkType::Url;
             seg.raw          = url;
