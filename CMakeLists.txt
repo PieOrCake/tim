@@ -51,8 +51,25 @@ set(HEADERS
     src/GW2API.h
 )
 
+# Generate Nyan Cat frame data from GIF at build time
+add_custom_command(
+    OUTPUT  ${CMAKE_SOURCE_DIR}/src/nyancat_frames.h
+    COMMAND bash ${CMAKE_SOURCE_DIR}/cmake/gen_nyan_frames.sh
+            ${CMAKE_SOURCE_DIR}/nyan-cat.gif
+            ${CMAKE_BINARY_DIR}
+            ${CMAKE_SOURCE_DIR}/src/nyancat_frames.h
+    DEPENDS ${CMAKE_SOURCE_DIR}/nyan-cat.gif
+            ${CMAKE_SOURCE_DIR}/cmake/gen_nyan_frames.sh
+    COMMENT "Generating src/nyancat_frames.h from nyan-cat.gif"
+    VERBATIM
+)
+add_custom_target(nyancat_frames_h
+    DEPENDS ${CMAKE_SOURCE_DIR}/src/nyancat_frames.h)
+
 # Create shared library (DLL)
 add_library(TyrianIM SHARED ${SOURCES} ${HEADERS})
+
+add_dependencies(TyrianIM nyancat_frames_h)
 
 # Force Windows DLL extension
 set_target_properties(TyrianIM PROPERTIES

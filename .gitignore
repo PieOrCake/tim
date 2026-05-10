@@ -1,6 +1,9 @@
 # Build output
 build/
 
+# Generated build artifacts
+src/nyancat_frames.h
+
 # LLM files
 CLAUDE.md
 handover.md
