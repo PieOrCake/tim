@@ -2246,7 +2246,6 @@ static void NyanCatDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
     float h = mx.y - mn.y;
 
     // Fit the sprite within the panel maintaining 498:280 aspect ratio
-    // Scale to fill width; if that makes it too tall, scale to height instead
     float scale  = w / 498.0f;
     float cat_w  = w;
     float cat_h  = 280.0f * scale;
@@ -2254,9 +2253,27 @@ static void NyanCatDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
         cat_h = h * 0.55f;
         cat_w = cat_h * (498.0f / 280.0f);
     }
-
     float cat_left = mn.x + (w - cat_w) * 0.5f;
     float cat_top  = mn.y + h * 0.5f - cat_h * 0.5f;
+    float cx = cat_left + cat_w * 0.5f;
+    float cy = cat_top  + cat_h * 0.5f;
+
+    // Radial glow — triangle fan from cat centre, fades to transparent at edge
+    constexpr int   kSeg        = 32;
+    constexpr ImU32 kGlowCentre = IM_COL32(210, 80, 220, 55);
+    constexpr ImU32 kGlowOuter  = IM_COL32(210, 80, 220,  0);
+    float radius = fminf(w, h) * 0.45f;
+    ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+    dl->PrimReserve(kSeg * 3, kSeg * 3);
+    for (int j = 0; j < kSeg; j++) {
+        float a0 = (j    ) * (2.0f * 3.14159265f / kSeg);
+        float a1 = (j + 1) * (2.0f * 3.14159265f / kSeg);
+        dl->PrimVtx(ImVec2(cx,                     cy                    ), uv, kGlowCentre);
+        dl->PrimVtx(ImVec2(cx + cosf(a0) * radius, cy + sinf(a0) * radius), uv, kGlowOuter);
+        dl->PrimVtx(ImVec2(cx + cosf(a1) * radius, cy + sinf(a1) * radius), uv, kGlowOuter);
+    }
+
+    NyanCatStars(dl, mn, mx, 20);
 
     int        frame = (int)((float)ImGui::GetTime() / 0.05f) % NYAN_FRAME_COUNT;
     Texture_t* tex   = s_NyanFrames[frame];
@@ -2266,8 +2283,6 @@ static void NyanCatDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
             ImVec2(cat_left, cat_top),
             ImVec2(cat_left + cat_w, cat_top + cat_h));
     }
-
-    NyanCatStars(dl, mn, mx, 20);
 }
 
 static void NyanCatDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
