@@ -543,6 +543,7 @@ bool g_WindowVisible = false;
 // UI State
 static std::string g_SelectedContact;
 static std::string g_PendingDeleteContact;
+static bool        g_ConfirmClearHistoryOpen = false;
 static bool g_ContextMenuContactPinned = false;
 static std::unordered_map<std::string, std::string> g_ContactNotes;
 static std::string g_NoteEditContact;
@@ -579,7 +580,11 @@ static NexusLinkData_t* g_NexusLink = nullptr;
 static char g_InputBuf[200] = {};
 static bool g_FocusInput = false;
 static int g_SendDelay = 50;  // ms between keystrokes
+static bool g_RestoreChannel = false;
 static std::atomic<bool> g_IsSending{false};
+static std::atomic<int> g_LastChanType(ChatMsg_Local);
+static std::atomic<int> g_LastChanFlags(0);   // ChatMetadataFlags for last channel
+static std::atomic<int> g_LastGuildIndex(0);  // guild index from +0x38, only valid when last chan was Guild
 static std::string g_ActiveThemeName = "Nexus";
 static std::unordered_map<std::string, std::string> g_Drafts;
 
@@ -842,6 +847,35 @@ static bool CopyToClipboard(HWND hwnd, const std::wstring& text) {
     return true;
 }
 
+static std::string GetOwnCharName() {
+    if (!g_MumbleLink || !g_MumbleLink->Identity[0]) return {};
+    // Identity is GW2 JSON: {"name":"Pie Or Cake","profession":4,...}
+    char identity[512] = {};
+    WideCharToMultiByte(CP_UTF8, 0, g_MumbleLink->Identity, -1, identity, sizeof(identity), nullptr, nullptr);
+    const char* key = "\"name\":\"";
+    const char* found = strstr(identity, key);
+    if (!found) return {};
+    found += strlen(key);
+    const char* end = strchr(found, '"');
+    if (!end) return {};
+    return std::string(found, end);
+}
+
+static std::wstring GetChannelCommand(ChatMessageType type, ChatMetadataFlags flags, int guildIndex) {
+    switch (type) {
+        case ChatMsg_Local:   return L"/s";
+        case ChatMsg_Map:     return L"/m";
+        case ChatMsg_Party:   return L"/p";
+        case ChatMsg_Squad:   return L"/d";
+        case ChatMsg_TeamPvP:
+        case ChatMsg_TeamWvW: return L"/t";
+        case ChatMsg_Guild:
+            // guildIndex from +0x38: 0 = /g1, 1 = /g2, ..., 5 = /g6
+            return L"/g" + std::to_wstring(guildIndex + 1);
+        default: return L"/s";
+    }
+}
+
 // Send a whisper via the chatbox using clipboard paste
 // Runs on a detached thread; uses the Chat Shorts hybrid pattern
 static void SendWhisperViaChatbox(const std::string& recipient, const std::string& message) {
@@ -870,7 +904,13 @@ static void SendWhisperViaChatbox(const std::string& recipient, const std::strin
     // Capture the SendToGameOnly function pointer for use on the send thread
     auto sendToGame = APIDefs->WndProc_SendToGameOnly;
 
-    std::thread([wrecip, wmsg, hwnd, delay, sendToGame]() {
+    bool doRestore = g_RestoreChannel;
+    std::wstring chanCmd = GetChannelCommand(
+        (ChatMessageType)g_LastChanType.load(),
+        (ChatMetadataFlags)g_LastChanFlags.load(),
+        g_LastGuildIndex.load());
+
+    std::thread([wrecip, wmsg, hwnd, delay, sendToGame, doRestore, chanCmd]() {
 
         auto pasteClipboard = [&](const std::wstring& text) {
             if (!CopyToClipboard(hwnd, text)) return;
@@ -921,12 +961,33 @@ static void SendWhisperViaChatbox(const std::string& recipient, const std::strin
         // Step 4: Paste message
         pasteClipboard(wmsg);
 
-        // Step 5: Send with Enter, then unconditionally send Escape to ensure chatbox closes
+        // Step 5: Send with Enter, then close chatbox only if it is still open.
         sendToGame(hwnd, WM_KEYDOWN, VK_RETURN, GetKeyLParam(VK_RETURN, true));
         sendToGame(hwnd, WM_KEYUP, VK_RETURN, GetKeyLParam(VK_RETURN, false));
         std::this_thread::sleep_for(std::chrono::milliseconds(delay * 3));
-        sendToGame(hwnd, WM_KEYDOWN, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, true));
-        sendToGame(hwnd, WM_KEYUP, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, false));
+        if (g_MumbleLink && g_MumbleLink->Context.IsTextboxFocused) {
+            sendToGame(hwnd, WM_KEYDOWN, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, true));
+            sendToGame(hwnd, WM_KEYUP, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, false));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay * 2));
+        }
+
+        // Step 6: Restore previous chat channel.
+        // '/' opens the chatbox; Enter commits the channel switch (leaves chatbox open);
+        // a final conditional Escape closes it.
+        if (doRestore && !chanCmd.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay * 3));
+            for (wchar_t ch : chanCmd) {
+                sendToGame(hwnd, WM_CHAR, (WPARAM)ch, 0);
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            }
+            sendToGame(hwnd, WM_KEYDOWN, VK_RETURN, GetKeyLParam(VK_RETURN, true));
+            sendToGame(hwnd, WM_KEYUP,   VK_RETURN, GetKeyLParam(VK_RETURN, false));
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay * 2));
+            if (g_MumbleLink && g_MumbleLink->Context.IsTextboxFocused) {
+                sendToGame(hwnd, WM_KEYDOWN, VK_ESCAPE, GetKeyLParam(VK_ESCAPE, true));
+                sendToGame(hwnd, WM_KEYUP,   VK_ESCAPE, GetKeyLParam(VK_ESCAPE, false));
+            }
+        }
 
         g_IsSending = false;
     }).detach();
@@ -1176,6 +1237,7 @@ static void SaveSettings() {
     f << "icon_scale=" << g_FloatingIconScale << "\n";
     f << "show_qa_icon=" << (g_ShowQAIcon ? 1 : 0) << "\n";
     f << "send_delay=" << g_SendDelay << "\n";
+    f << "restore_channel=" << (g_RestoreChannel ? 1 : 0) << "\n";
     f << "active_theme=" << g_ActiveThemeName << "\n";
     auto pinned = TyrianIM::ChatManager::GetPinnedContacts();
     std::sort(pinned.begin(), pinned.end());
@@ -1216,6 +1278,7 @@ static void LoadSettings() {
         else if (key == "floating_icon_locked") g_FloatingIconLocked = (val == "1");
         else if (key == "show_qa_icon") g_ShowQAIcon = (val == "1");
         else if (key == "send_delay") try { g_SendDelay = std::stoi(val); if (g_SendDelay < 10) g_SendDelay = 10; if (g_SendDelay > 200) g_SendDelay = 200; } catch (...) {}
+        else if (key == "restore_channel") g_RestoreChannel = (val == "1");
         else if (key == "floating_icon_only_on_unread") g_FloatingIconOnlyOnUnread = (val == "1");
         else if (key == "font_scale") try { g_FontScale = std::stof(val); if (g_FontScale < 0.8f) g_FontScale = 0.8f; if (g_FontScale > 2.0f) g_FontScale = 2.0f; } catch (...) {}
         else if (key == "icon_scale") try { g_FloatingIconScale = std::stof(val); if (g_FloatingIconScale < 0.5f) g_FloatingIconScale = 0.5f; if (g_FloatingIconScale > 3.0f) g_FloatingIconScale = 3.0f; } catch (...) {}
@@ -3410,6 +3473,15 @@ static void RenderMessageArea() {
                         // Underline
                         dl->AddLine(ImVec2(sp.x, sp.y + sl.size.y - 2),
                                     ImVec2(sp.x + sl.size.x, sp.y + sl.size.y - 2), lc);
+                        // Spinner while the API fetch is in progress
+                        if (seg.link.state == TyrianIM::LinkState::Pending) {
+                            static const char* kSpinFrames[] = { "|", "/", "-", "\\" };
+                            int frame = static_cast<int>(ImGui::GetTime() * 8.0) & 3;
+                            ImU32 sc = applyAlpha(IM_COL32(180, 180, 180, 200), msgAlpha);
+                            dl->AddText(font, fs,
+                                ImVec2(sp.x + sl.size.x + 3.0f, sp.y),
+                                sc, kSpinFrames[frame]);
+                        }
                     }
                 }
             }
@@ -3445,26 +3517,78 @@ static void RenderMessageArea() {
                     if (lHovered) {
                         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                         ImGui::BeginTooltip();
-                        ImGui::TextColored(
-                            ImGui::ColorConvertU32ToFloat4(seg.link.colour),
-                            "%s", seg.link.display.c_str());
-                        if (!seg.link.tooltip_text.empty())
-                            ImGui::TextUnformatted(seg.link.tooltip_text.c_str());
+
+                        const std::string& tt  = seg.link.tooltip_text;
+                        ImVec4 rarityCol = ImGui::ColorConvertU32ToFloat4(seg.link.colour);
+                        ImVec4 grayCol   = ImVec4(0.65f, 0.65f, 0.65f, 1.0f);
+
+                        // Split tooltip_text into lines, handle icon prefix on first line
+                        int tt_start = 0;
+                        if (!tt.empty() && tt[0] == '\x03') {
+                            // Format: \x03TexID|remote|endpoint\n
+                            size_t nl = tt.find('\n');
+                            std::string icon_line = tt.substr(1, nl == std::string::npos ? std::string::npos : nl - 1);
+                            size_t p1 = icon_line.find('|');
+                            size_t p2 = (p1 != std::string::npos) ? icon_line.find('|', p1 + 1) : std::string::npos;
+                            if (p1 != std::string::npos && p2 != std::string::npos) {
+                                std::string tex_id   = icon_line.substr(0, p1);
+                                std::string remote   = icon_line.substr(p1 + 1, p2 - p1 - 1);
+                                std::string endpoint = icon_line.substr(p2 + 1);
+                                Texture_t* tex = APIDefs ? APIDefs->Textures_Get(tex_id.c_str()) : nullptr;
+                                if (!tex && APIDefs)
+                                    APIDefs->Textures_LoadFromURL(tex_id.c_str(), remote.c_str(), endpoint.c_str(), nullptr);
+                                if (tex && tex->Resource) {
+                                    ImGui::Image((ImTextureID)tex->Resource, ImVec2(32.0f, 32.0f));
+                                    ImGui::SameLine();
+                                }
+                            }
+                            tt_start = (nl == std::string::npos) ? (int)tt.size() : (int)nl + 1;
+                        }
+
+                        // Item name in rarity colour (beside icon if present)
+                        ImGui::TextColored(rarityCol, "%s", seg.link.display.c_str());
+
+                        // Remaining lines — extract each line, handle prefix markers
+                        size_t pos = (size_t)tt_start;
+                        while (pos < tt.size()) {
+                            size_t nl  = tt.find('\n', pos);
+                            size_t end = (nl == std::string::npos) ? tt.size() : nl;
+                            if (end == pos) {
+                                ImGui::Spacing();
+                            } else {
+                                char prefix = tt[pos];
+                                if (prefix == '\x01') {
+                                    std::string line(tt.begin() + pos + 1, tt.begin() + end);
+                                    ImGui::TextColored(rarityCol, "%s", line.c_str());
+                                } else if (prefix == '\x02') {
+                                    std::string line(tt.begin() + pos + 1, tt.begin() + end);
+                                    ImGui::TextColored(grayCol, "%s", line.c_str());
+                                } else {
+                                    ImGui::TextUnformatted(tt.c_str() + pos, tt.c_str() + end);
+                                }
+                            }
+                            pos = (nl == std::string::npos) ? tt.size() : nl + 1;
+                        }
+
                         ImGui::EndTooltip();
                     }
                     if (lClicked) {
-                        std::string ctxt =
-                            (seg.link.type == TyrianIM::GW2LinkType::AE2Build &&
-                             !seg.link.ae2_chat_link.empty())
-                            ? seg.link.ae2_chat_link : NormalizeGW2Text(seg.link.raw);
-                        ImGui::SetClipboardText(ctxt.c_str());
-                        if (seg.link.type == TyrianIM::GW2LinkType::MapLink)
-                            g_ClipboardMsg = "Waypoint link copied \xe2\x80\x94 paste in chat to use";
-                        else if (seg.link.type == TyrianIM::GW2LinkType::AE2Build)
-                            g_ClipboardMsg = "Build link copied";
-                        else
-                            g_ClipboardMsg = "Link copied";
-                        g_ClipboardMsgExpiry = ImGui::GetTime() + 2.5;
+                        if (seg.link.type == TyrianIM::GW2LinkType::Url) {
+                            ShellExecuteA(NULL, "open", seg.link.raw.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                        } else {
+                            std::string ctxt =
+                                (seg.link.type == TyrianIM::GW2LinkType::AE2Build &&
+                                 !seg.link.ae2_chat_link.empty())
+                                ? seg.link.ae2_chat_link : NormalizeGW2Text(seg.link.raw);
+                            ImGui::SetClipboardText(ctxt.c_str());
+                            if (seg.link.type == TyrianIM::GW2LinkType::MapLink)
+                                g_ClipboardMsg = "Waypoint link copied \xe2\x80\x94 paste in chat to use";
+                            else if (seg.link.type == TyrianIM::GW2LinkType::AE2Build)
+                                g_ClipboardMsg = "Build link copied";
+                            else
+                                g_ClipboardMsg = "Link copied";
+                            g_ClipboardMsgExpiry = ImGui::GetTime() + 2.5;
+                        }
                     }
                 }
             }
@@ -3593,6 +3717,8 @@ void AddonRender() {
 
     ImGui::End();
 
+    TyrianIM::WhisperHook::RenderDebugWindow();
+
 }
 
 // Options panel (shown in Nexus addon settings)
@@ -3631,15 +3757,25 @@ void AddonOptions() {
         settings_changed = true;
     }
 
-    // Theme selection
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Text("Theme");
+    if (ImGui::Checkbox("Show message timestamps", &g_ShowTimestamps)) {
+        InvalidateBubbleCache();
+        settings_changed = true;
+    }
+
+    if (ImGui::Checkbox("Show quick access icon", &g_ShowQAIcon)) {
+        if (g_ShowQAIcon) {
+            APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_TYRIANIM_TOGGLE", "Tyrian IM");
+        } else {
+            APIDefs->QuickAccess_Remove(QA_ID);
+        }
+        settings_changed = true;
+    }
+
     ImGui::Spacing();
     ImGui::SetNextItemWidth(200);
     const char* themePreview = g_LoadedThemes.empty() ? "GW2 Dark"
                              : g_LoadedThemes[g_ActiveThemeIndex].name.c_str();
-    if (ImGui::BeginCombo("##ThemeSelect", themePreview)) {
+    if (ImGui::BeginCombo("Theme##ThemeSelect", themePreview)) {
         for (int i = 0; i < (int)g_LoadedThemes.size(); ++i) {
             bool sel = (i == g_ActiveThemeIndex);
             if (ImGui::Selectable(g_LoadedThemes[i].name.c_str(), sel)) {
@@ -3667,36 +3803,10 @@ void AddonOptions() {
         ApplyNamedTheme(g_ActiveThemeName);
     }
 
-    if (ImGui::Checkbox("Show quick access icon", &g_ShowQAIcon)) {
-        if (g_ShowQAIcon) {
-            APIDefs->QuickAccess_Add(QA_ID, TEX_ICON, TEX_ICON_HOVER, "KB_TYRIANIM_TOGGLE", "Tyrian IM");
-        } else {
-            APIDefs->QuickAccess_Remove(QA_ID);
-        }
-        settings_changed = true;
-    }
-
-    // --- Sending ---
+    // --- Notifications ---
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::Text("Sending");
-    ImGui::Spacing();
-
-    ImGui::SetNextItemWidth(150);
-    if (ImGui::SliderInt("Send delay (ms)", &g_SendDelay, 10, 200)) {
-        settings_changed = true;
-    }
-    ImGui::TextColored(g_ActiveTheme.timestamp, "Delay between each keystroke action. Increase if sends fail.");
-
-    if (ImGui::Checkbox("Show message timestamps", &g_ShowTimestamps)) {
-        InvalidateBubbleCache();
-        settings_changed = true;
-    }
-
-    // --- Notification Icon ---
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Text("Notification Icon");
+    ImGui::Text("Notifications");
     ImGui::Spacing();
 
     if (ImGui::Checkbox("Show floating icon", &g_ShowFloatingIcon)) {
@@ -3717,22 +3827,15 @@ void AddonOptions() {
         ImGui::Unindent();
     }
 
-    // --- Sound ---
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Text("Sound");
-    ImGui::Spacing();
-
     if (ImGui::Checkbox("Play sound on incoming whisper", &g_SoundEnabled)) {
         settings_changed = true;
     }
     if (g_SoundEnabled) {
         ImGui::Indent();
-        ImGui::Text("Sound file:");
-        ImGui::SameLine();
         ImGui::PushItemWidth(200);
         const char* preview = g_SelectedSound.empty() ? "(Default)" : g_SelectedSound.c_str();
-        if (ImGui::BeginCombo("##SoundSelect", preview)) {
+        if (ImGui::BeginCombo("Sound file##SoundSelect", preview)) {
             if (ImGui::Selectable("(Default)", g_SelectedSound.empty())) {
                 g_SelectedSound.clear();
                 settings_changed = true;
@@ -3748,16 +3851,36 @@ void AddonOptions() {
         }
         ImGui::PopItemWidth();
         ImGui::SameLine();
-        if (ImGui::SmallButton("Refresh")) {
+        if (ImGui::SmallButton("Refresh##Sound")) {
             ScanSoundFiles();
         }
         if (ImGui::SmallButton("Test Sound")) {
             PlayNotificationSound(g_SelectedSound);
         }
         ImGui::SameLine();
-        ImGui::TextColored(g_ActiveTheme.timestamp, "Place .wav/.mp3 files in: addons/TyrianIM/sounds/");
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Place .wav or .mp3 files in: addons/TyrianIM/sounds/");
         ImGui::Unindent();
     }
+
+    // --- Sending ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Sending");
+    ImGui::Spacing();
+
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::SliderInt("Send delay (ms)", &g_SendDelay, 10, 200)) {
+        settings_changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Delay between each keystroke action.\nIncrease if sends fail.");
+    ImGui::Separator();
+    if (ImGui::Button("Toggle Chat Debug Window"))
+        TyrianIM::WhisperHook::s_ShowDebugWindow = !TyrianIM::WhisperHook::s_ShowDebugWindow;
 
     // --- Data ---
     ImGui::Spacing();
@@ -3766,26 +3889,31 @@ void AddonOptions() {
     ImGui::Spacing();
 
     if (ImGui::Button("Clear Chat History")) {
-        TyrianIM::ChatManager::Shutdown();
-        std::string dir = APIDefs ? std::string(APIDefs->Paths_GetAddonDirectory("TyrianIM")) : "";
-        TyrianIM::ChatManager::Initialize(dir);
-        g_SelectedContact.clear();
+        g_ConfirmClearHistoryOpen = true;
     }
 
-    // --- Debug ---
-    if (status == TyrianIM::HookStatus::Hooked) {
+    if (g_ConfirmClearHistoryOpen) {
+        ImGui::OpenPopup("Clear Chat History?##ConfirmClear");
+        g_ConfirmClearHistoryOpen = false;
+    }
+    if (ImGui::BeginPopupModal("Clear Chat History?##ConfirmClear", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("This will permanently delete all conversation history.");
+        ImGui::Text("This cannot be undone.");
         ImGui::Spacing();
         ImGui::Separator();
-        ImGui::Text("Debug");
         ImGui::Spacing();
-
-        bool probe = TyrianIM::WhisperHook::GetProbeMode();
-        if (ImGui::Checkbox("Probe Mode", &probe)) {
-            TyrianIM::WhisperHook::SetProbeMode(probe);
+        if (ImGui::Button("Delete Everything", ImVec2(140, 0))) {
+            TyrianIM::ChatManager::Shutdown();
+            std::string dir = APIDefs ? std::string(APIDefs->Paths_GetAddonDirectory("TyrianIM")) : "";
+            TyrianIM::ChatManager::Initialize(dir);
+            g_SelectedContact.clear();
+            ImGui::CloseCurrentPopup();
         }
-        if (probe) {
-            ImGui::TextColored(g_ActiveTheme.status_warn, "Dumping raw event data to debug window.");
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();
         }
+        ImGui::EndPopup();
     }
 
     if (settings_changed) {
@@ -3823,6 +3951,13 @@ void AddonLoad(AddonAPI_t* aApi) {
     TyrianIM::WhisperHook::SetErrorCallback(OnWhisperError);
     TyrianIM::WhisperHook::SetNamePairCallback([](const std::string& char_name, const std::string& account_name) {
         TyrianIM::ChatManager::MergeConversation(char_name, account_name);
+    });
+    TyrianIM::WhisperHook::SetChannelCallback([](ChatMessageType type, ChatMetadataFlags flags, const std::string& name, int guildIndex) {
+        if (name == GetOwnCharName()) {
+            g_LastChanType.store((int)type);
+            g_LastChanFlags.store((int)flags);
+            g_LastGuildIndex.store(guildIndex);
+        }
     });
 
     // Attempt to install whisper hooks (will log warning that patterns aren't defined yet)
