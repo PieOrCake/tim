@@ -174,7 +174,10 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
                 if (IsReadableMemory(raw + 0x38, 4))
                     guildIdx = (int)(*(const uint32_t*)(raw + 0x38));
             }
-            s_ChannelCallback(msg->Type, msg->Flags, gm->CharacterName, guildIdx);
+            std::string content;
+            if (gm->Content && IsReadableMemory(gm->Content, 1))
+                content = gm->Content;
+            s_ChannelCallback(msg->Type, msg->Flags, gm->CharacterName, guildIdx, content);
         }
     }
 

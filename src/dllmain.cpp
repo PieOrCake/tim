@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cwchar>
 #include <unordered_map>
+#include <deque>
 #include "../include/nexus/Nexus.h"
 #include "../include/mumble/Mumble.h"
 #include "../lib/toml.hpp"
@@ -543,6 +544,20 @@ static void NyanFrameCallback(const char* aId, Texture_t* aTex) {
     if (i >= 0 && i < NYAN_FRAME_COUNT)
         s_NyanFrames[i] = aTex;
 }
+
+// URL toast notification queue
+struct UrlToast {
+    std::string     url;
+    std::string     domain;
+    std::string     charName;
+    ChatMessageType chanType;
+};
+static std::deque<UrlToast> g_UrlToastQueue;
+static std::mutex           g_UrlToastMutex;
+static bool                 g_UrlToastEnabled = true;
+static bool                 g_UrlToastLocked  = true;
+static float                g_UrlToastX       = -1.0f;
+static float                g_UrlToastY       = -1.0f;
 
 // Global variables
 HMODULE hSelf;
@@ -1248,6 +1263,10 @@ static void SaveSettings() {
     f << "show_qa_icon=" << (g_ShowQAIcon ? 1 : 0) << "\n";
     f << "send_delay=" << g_SendDelay << "\n";
     f << "restore_channel=" << (g_RestoreChannel ? 1 : 0) << "\n";
+    f << "url_toast_enabled=" << (g_UrlToastEnabled ? 1 : 0) << "\n";
+    f << "url_toast_locked=" << (g_UrlToastLocked ? 1 : 0) << "\n";
+    f << "url_toast_x=" << g_UrlToastX << "\n";
+    f << "url_toast_y=" << g_UrlToastY << "\n";
     f << "active_theme=" << g_ActiveThemeName << "\n";
     auto pinned = TyrianIM::ChatManager::GetPinnedContacts();
     std::sort(pinned.begin(), pinned.end());
@@ -1289,6 +1308,10 @@ static void LoadSettings() {
         else if (key == "show_qa_icon") g_ShowQAIcon = (val == "1");
         else if (key == "send_delay") try { g_SendDelay = std::stoi(val); if (g_SendDelay < 10) g_SendDelay = 10; if (g_SendDelay > 200) g_SendDelay = 200; } catch (...) {}
         else if (key == "restore_channel") g_RestoreChannel = (val == "1");
+        else if (key == "url_toast_enabled") g_UrlToastEnabled = (val == "1");
+        else if (key == "url_toast_locked") g_UrlToastLocked = (val == "1");
+        else if (key == "url_toast_x") try { g_UrlToastX = std::stof(val); } catch (...) {}
+        else if (key == "url_toast_y") try { g_UrlToastY = std::stof(val); } catch (...) {}
         else if (key == "floating_icon_only_on_unread") g_FloatingIconOnlyOnUnread = (val == "1");
         else if (key == "font_scale") try { g_FontScale = std::stof(val); if (g_FontScale < 0.8f) g_FontScale = 0.8f; if (g_FontScale > 2.0f) g_FontScale = 2.0f; } catch (...) {}
         else if (key == "icon_scale") try { g_FloatingIconScale = std::stof(val); if (g_FloatingIconScale < 0.5f) g_FloatingIconScale = 0.5f; if (g_FloatingIconScale > 3.0f) g_FloatingIconScale = 3.0f; } catch (...) {}
@@ -3888,6 +3911,82 @@ static void RenderMessageArea() {
     ImGui::EndChild();
 }
 
+static const char* ChanTypeName(ChatMessageType t) {
+    switch (t) {
+        case ChatMsg_Local:   return "Say";
+        case ChatMsg_Map:     return "Map";
+        case ChatMsg_Party:   return "Party";
+        case ChatMsg_Guild:   return "Guild";
+        case ChatMsg_Squad:   return "Squad";
+        case ChatMsg_TeamPvP: return "Team";
+        case ChatMsg_TeamWvW: return "Team";
+        default:              return "Chat";
+    }
+}
+
+static void RenderUrlToast() {
+    if (!g_UrlToastEnabled) return;
+
+    std::unique_lock<std::mutex> lk(g_UrlToastMutex);
+    if (g_UrlToastQueue.empty()) return;
+    UrlToast toast = g_UrlToastQueue.front();
+    lk.unlock();
+
+    ImGuiIO& io = ImGui::GetIO();
+    constexpr float kW = 320.0f, kH = 94.0f, kMargin = 16.0f;
+
+    float px = (g_UrlToastX >= 0.0f) ? g_UrlToastX : io.DisplaySize.x - kW - kMargin;
+    float py = (g_UrlToastY >= 0.0f) ? g_UrlToastY : io.DisplaySize.y - kH - kMargin;
+    ImGui::SetNextWindowPos(ImVec2(px, py),
+        g_UrlToastLocked ? ImGuiCond_Always : ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(kW, kH), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.92f);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoNav
+                           | ImGuiWindowFlags_NoSavedSettings
+                           | ImGuiWindowFlags_NoBringToFrontOnFocus
+                           | ImGuiWindowFlags_NoResize
+                           | ImGuiWindowFlags_NoScrollbar
+                           | ImGuiWindowFlags_NoTitleBar;
+    if (g_UrlToastLocked)
+        flags |= ImGuiWindowFlags_NoMove;
+
+    if (ImGui::Begin("##UrlToast", nullptr, flags)) {
+        std::string header = std::string("[") + ChanTypeName(toast.chanType) + "] "
+                           + toast.charName + " shared a link";
+        ImGui::TextUnformatted(header.c_str());
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.7f, 1.0f, 1.0f));
+        ImGui::TextUnformatted(toast.domain.c_str());
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", toast.url.c_str());
+
+        ImGui::Spacing();
+
+        if (ImGui::Button("Open in Browser")) {
+            ShellExecuteA(NULL, "open", toast.url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            std::lock_guard<std::mutex> lk2(g_UrlToastMutex);
+            g_UrlToastQueue.pop_front();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Dismiss")) {
+            std::lock_guard<std::mutex> lk2(g_UrlToastMutex);
+            g_UrlToastQueue.pop_front();
+        }
+
+        if (!g_UrlToastLocked) {
+            ImVec2 pos = ImGui::GetWindowPos();
+            if (pos.x != g_UrlToastX || pos.y != g_UrlToastY) {
+                g_UrlToastX = pos.x;
+                g_UrlToastY = pos.y;
+                SaveSettings();
+            }
+        }
+    }
+    ImGui::End();
+}
+
 // Main render function
 void AddonRender() {
     ThemeGuard themeGuard;
@@ -3909,6 +4008,7 @@ void AddonRender() {
 
     // Always render floating icon (independent of main window)
     RenderFloatingIcon();
+    RenderUrlToast();
 
     if (!g_WindowVisible) return;
 
@@ -4055,6 +4155,18 @@ void AddonOptions() {
     }
 
     ImGui::Spacing();
+    if (ImGui::Checkbox("Show URL toast notifications", &g_UrlToastEnabled)) {
+        settings_changed = true;
+    }
+    if (g_UrlToastEnabled) {
+        ImGui::Indent();
+        if (ImGui::Checkbox("Lock position##UrlToast", &g_UrlToastLocked)) {
+            settings_changed = true;
+        }
+        ImGui::Unindent();
+    }
+
+    ImGui::Spacing();
     if (ImGui::Checkbox("Play sound on incoming whisper", &g_SoundEnabled)) {
         settings_changed = true;
     }
@@ -4179,11 +4291,29 @@ void AddonLoad(AddonAPI_t* aApi) {
     TyrianIM::WhisperHook::SetNamePairCallback([](const std::string& char_name, const std::string& account_name) {
         TyrianIM::ChatManager::MergeConversation(char_name, account_name);
     });
-    TyrianIM::WhisperHook::SetChannelCallback([](ChatMessageType type, ChatMetadataFlags flags, const std::string& name, int guildIndex) {
+    TyrianIM::WhisperHook::SetChannelCallback([](ChatMessageType type, ChatMetadataFlags flags,
+                                                  const std::string& name, int guildIndex,
+                                                  const std::string& content) {
         if (name == GetOwnCharName()) {
             g_LastChanType.store((int)type);
             g_LastChanFlags.store((int)flags);
             g_LastGuildIndex.store(guildIndex);
+            return; // don't toast own messages
+        }
+
+        if (!g_UrlToastEnabled || content.empty()) return;
+
+        auto segments = TyrianIM::ParseSegments(content);
+        for (auto& seg : segments) {
+            if (!seg.is_link) continue;
+            if (seg.link.type != TyrianIM::GW2LinkType::Url) continue;
+            UrlToast toast;
+            toast.url      = seg.link.raw;
+            toast.domain   = seg.link.display;
+            toast.charName = name;
+            toast.chanType = type;
+            std::lock_guard<std::mutex> lk(g_UrlToastMutex);
+            g_UrlToastQueue.push_back(std::move(toast));
         }
     });
 

@@ -84,7 +84,7 @@ namespace TyrianIM {
 using WhisperCallback = std::function<void(const std::string& sender, const std::string& recipient, const std::string& message, bool is_incoming)>;
 using ErrorCallback = std::function<void(const std::string& contact, const std::string& error_text)>;
 using NamePairCallback = std::function<void(const std::string& character_name, const std::string& account_name)>;
-using ChannelCallback = std::function<void(ChatMessageType type, ChatMetadataFlags flags, const std::string& charName, int guildIndex)>;
+using ChannelCallback = std::function<void(ChatMessageType type, ChatMetadataFlags flags, const std::string& charName, int guildIndex, const std::string& content)>;
 
 enum class HookStatus {
     NotInitialized,
