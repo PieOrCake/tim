@@ -2160,14 +2160,14 @@ static void NyanCatStars(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
     };
 
     for (int i = 0; i < count; i++) {
-        float phi  = i * 0.6180339f;  // golden ratio — spreads y positions
-        float psi  = i * 0.3819660f;  // spreads x offsets and speeds
+        // Low-discrepancy sequences in [0,1) — gives even spread across the panel
+        float phi  = fmodf(i * 0.6180339f, 1.0f);  // golden ratio sequence
+        float psi  = fmodf(i * 0.7548777f, 1.0f);  // plastic constant sequence
 
         // Fixed y per star, scrolling x (right to left, wraps at left edge)
-        float speed  = kBaseSpeed * (0.6f + 0.8f * fmodf(psi * 7.3f, 1.0f));
-        float x0     = fmodf(phi * w * 2.0f, w);        // staggered start
-        float sx     = mx.x - fmodf(t * speed + x0, w); // scrolls left, wraps
-        float sy     = mn.y + fmodf(phi * h * 1.618f, h);
+        float speed  = kBaseSpeed * (0.6f + 0.8f * fmodf(i * 0.1234f, 1.0f));
+        float sx     = mx.x - fmodf(t * speed + phi * w, w);
+        float sy     = mn.y + psi * h;
 
         // Twinkling cycle — independent of scroll position
         float phase = i * (kCycle / count);
