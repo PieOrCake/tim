@@ -24,6 +24,7 @@
 #include "WhisperHook.h"
 #include "ChatLinks.h"
 #include "GW2API.h"
+#include "nyancat_frames.h"
 
 // Version constants
 #define V_MAJOR 0
@@ -533,6 +534,9 @@ static const unsigned char FLOAT_ICON_DATA[] = {
     0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 };
 static const unsigned int FLOAT_ICON_DATA_SIZE = 3047;
+
+// Nyan Cat animation frame textures (populated in AddonLoad)
+static Texture_t* s_NyanFrames[NYAN_FRAME_COUNT] = {};
 
 // Global variables
 HMODULE hSelf;
@@ -2135,6 +2139,123 @@ static TyrianTheme BuildNexusTheme() {
     return t;
 }
 
+// ── Nyan Cat draw hooks ───────────────────────────────────────────────────────
+
+static void NyanCatStars(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float t = (float)ImGui::GetTime();
+    float w = mx.x - mn.x;
+    float h = mx.y - mn.y;
+    constexpr float kCycle  = 2.5f;
+    constexpr ImU32 kWhite  = IM_COL32(255, 255, 255, 220);
+    constexpr float kAngles[8] = {
+        0.000f, 0.785f, 1.571f, 2.356f,
+        3.142f, 3.927f, 4.712f, 5.498f
+    };
+
+    for (int i = 0; i < count; i++) {
+        float phi   = i * 0.6180339f;
+        float psi   = i * 0.3819660f;
+        float phase = i * (kCycle / count);
+        float frac  = fmodf(t + phase, kCycle) / kCycle;
+
+        int   seed = (int)((t + phase) / kCycle);
+        float sx   = mn.x + fmodf(phi * (float)(seed * 7 + 3), 1.0f) * w;
+        float sy   = mn.y + fmodf(psi * (float)(seed * 13 + 5), 1.0f) * h;
+
+        if (frac < 0.15f) {
+            dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + 2, sy + 2), kWhite);
+        } else if (frac < 0.35f) {
+            dl->AddRectFilled(ImVec2(sx - 1, sy - 1), ImVec2(sx + 2, sy + 2), kWhite);
+            dl->AddRectFilled(ImVec2(sx,     sy - 2), ImVec2(sx + 1, sy - 1), kWhite);
+            dl->AddRectFilled(ImVec2(sx,     sy + 2), ImVec2(sx + 1, sy + 3), kWhite);
+            dl->AddRectFilled(ImVec2(sx - 2, sy    ), ImVec2(sx - 1, sy + 1), kWhite);
+            dl->AddRectFilled(ImVec2(sx + 2, sy    ), ImVec2(sx + 3, sy + 1), kWhite);
+        } else if (frac < 0.60f) {
+            dl->AddRectFilled(ImVec2(sx - 1, sy - 1), ImVec2(sx + 2, sy + 2), kWhite);
+            for (int a = 2; a <= 5; a++) {
+                dl->AddRectFilled(ImVec2(sx,         sy - a    ), ImVec2(sx + 1, sy - a + 1), kWhite);
+                dl->AddRectFilled(ImVec2(sx,         sy + a - 1), ImVec2(sx + 1, sy + a    ), kWhite);
+                dl->AddRectFilled(ImVec2(sx - a,     sy        ), ImVec2(sx - a + 1, sy + 1), kWhite);
+                dl->AddRectFilled(ImVec2(sx + a - 1, sy        ), ImVec2(sx + a,     sy + 1), kWhite);
+            }
+        } else if (frac < 0.80f) {
+            for (float ang : kAngles) {
+                float rx = sx + cosf(ang) * 4.0f;
+                float ry = sy + sinf(ang) * 4.0f;
+                dl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 1, ry + 1), kWhite);
+            }
+        }
+        // frac 0.80–1.0: invisible, position reseeds next cycle
+    }
+}
+
+static void NyanCatRainbow(ImDrawList* dl, ImVec2 mn,
+                            float cat_left_x, float cat_center_y) {
+    static const ImU32 kBands[6] = {
+        IM_COL32(255,  30,   0, 255),
+        IM_COL32(255, 153,   0, 255),
+        IM_COL32(255, 240,   0, 255),
+        IM_COL32( 51, 210,   0, 255),
+        IM_COL32( 51, 102, 255, 255),
+        IM_COL32(160,   0, 255, 255),
+    };
+    constexpr float kBandH      = 8.0f;
+    constexpr float kWaveAmp    = 6.0f;
+    constexpr float kWaveLen    = 180.0f;
+    constexpr float kWavePeriod = 0.8f;
+    constexpr float kStripW     = 3.0f;
+
+    float t          = (float)ImGui::GetTime();
+    float k          = 2.0f * 3.14159265f / kWaveLen;
+    float omega      = 2.0f * 3.14159265f / kWavePeriod;
+    float rainbowTop = cat_center_y - 3.0f * kBandH;
+    float span       = cat_left_x - mn.x;
+    if (span <= 0.0f) return;
+
+    for (float x = mn.x; x < cat_left_x; x += kStripW) {
+        float wave     = kWaveAmp * sinf(k * (x - mn.x) + omega * t);
+        float progress = (x - mn.x) / span;
+        int   ia       = (int)((0.30f + progress * 0.65f) * 255.0f);
+
+        for (int b = 0; b < 6; b++) {
+            ImU32 col = (kBands[b] & 0x00FFFFFFu) | ((ImU32)ia << 24);
+            float y0  = rainbowTop + wave + b * kBandH;
+            dl->AddRectFilled(ImVec2(x, y0),
+                              ImVec2(x + kStripW + 1.0f, y0 + kBandH + 1.0f), col);
+        }
+    }
+}
+
+static void NyanCatDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float w = mx.x - mn.x;
+    float h = mx.y - mn.y;
+
+    float cat_h        = h * 0.38f;
+    float cat_w        = cat_h * (498.0f / 280.0f);
+    float cat_left     = mn.x + w * 0.50f;
+    float cat_top      = mn.y + h * 0.48f - cat_h * 0.5f;
+    float cat_center_y = cat_top + cat_h * 0.45f;
+
+    NyanCatRainbow(dl, mn, cat_left, cat_center_y);
+
+    int        frame = (int)((float)ImGui::GetTime() / 0.05f) % NYAN_FRAME_COUNT;
+    Texture_t* tex   = s_NyanFrames[frame];
+    if (tex && tex->Resource) {
+        dl->AddImage(
+            (ImTextureID)tex->Resource,
+            ImVec2(cat_left, cat_top),
+            ImVec2(cat_left + cat_w, cat_top + cat_h),
+            ImVec2(0.25f, 0.0f),
+            ImVec2(1.0f,  1.0f));
+    }
+
+    NyanCatStars(dl, mn, mx, 20);
+}
+
+static void NyanCatDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    NyanCatStars(dl, mn, mx, 8);
+}
+
 // ── Sylvari Grove draw hooks ──────────────────────────────────────────────────
 
 static void SylvariVines(ImDrawList* dl, ImVec2 mn, ImVec2 mx, float alpha) {
@@ -2702,6 +2823,71 @@ static TyrianTheme BuildHoelbrakTheme() {
     return t;
 }
 
+static TyrianTheme BuildNyanCatTheme() {
+    TyrianTheme t;
+    t.name        = "Nyan Cat";
+    t.description = "Pop-Tart cat flies through space — animated rainbow trail, pixel-art stars";
+    t.author      = "TyrianIM";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2DarkTheme().imgui_style;
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.10f, 0.19f, 0.38f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.08f, 0.15f, 0.30f, 0.85f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.08f, 0.15f, 0.30f, 0.97f);
+    c[ImGuiCol_Border]               = ImVec4(0.50f, 0.20f, 0.60f, 0.45f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.05f, 0.10f, 0.22f, 0.90f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.12f, 0.20f, 0.40f, 0.90f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.15f, 0.25f, 0.50f, 0.90f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.08f, 0.15f, 0.30f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.12f, 0.22f, 0.45f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.05f, 0.10f, 0.22f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.45f, 0.15f, 0.50f, 0.80f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.60f, 0.20f, 0.65f, 0.80f);
+    c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.75f, 0.25f, 0.80f, 0.90f);
+    c[ImGuiCol_Button]               = ImVec4(0.50f, 0.15f, 0.55f, 0.75f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.65f, 0.20f, 0.70f, 0.85f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.75f, 0.25f, 0.80f, 0.95f);
+    c[ImGuiCol_Header]               = ImVec4(0.50f, 0.15f, 0.55f, 0.60f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.60f, 0.18f, 0.65f, 0.70f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.70f, 0.22f, 0.75f, 0.80f);
+    c[ImGuiCol_Separator]            = ImVec4(0.40f, 0.15f, 0.50f, 0.50f);
+    c[ImGuiCol_Text]                 = ImVec4(0.90f, 0.90f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.50f, 0.55f, 0.70f, 1.00f);
+
+    s.WindowRounding    = 6.0f;
+    s.ChildRounding     = 6.0f;
+    s.FrameRounding     = 6.0f;
+    s.PopupRounding     = 6.0f;
+    s.ScrollbarRounding = 6.0f;
+    s.GrabRounding      = 6.0f;
+    s.TabRounding       = 6.0f;
+
+    t.bubble_self_top  = IM_COL32(210,  80, 180, 215);
+    t.bubble_self_bot  = IM_COL32(130,  35, 175, 225);
+    t.bubble_self      = t.bubble_self_top;
+    t.bubble_other_top = IM_COL32( 28,  52, 120, 200);
+    t.bubble_other_bot = IM_COL32( 14,  28,  70, 215);
+    t.bubble_other     = t.bubble_other_top;
+    t.bubble_rounding  = 6.0f;
+    t.header_bg        = IM_COL32( 10,  18,  48, 245);
+    t.active_bg        = IM_COL32(190,  55, 170, 180);
+    t.input_bg         = IM_COL32( 12,  22,  58, 220);
+    t.input_border     = IM_COL32(190,  70, 210, 160);
+    t.avatar_bg        = IM_COL32(170,  50, 200, 255);
+    t.pin_accent       = IM_COL32(255,  80,  80, 255);
+    t.unread_dot       = IM_COL32(255,  80,  80, 255);
+    t.sender_self      = ImVec4(1.00f, 0.55f, 0.85f, 1.0f);
+    t.sender_other     = ImVec4(0.45f, 0.80f, 1.00f, 1.0f);
+    t.timestamp        = ImVec4(0.50f, 0.60f, 0.80f, 0.65f);
+
+    t.draw_chat_bg     = NyanCatDrawChatBg;
+    t.draw_contacts_bg = NyanCatDrawContactsBg;
+
+    return t;
+}
+
 using ThemeBuilder = TyrianTheme(*)();
 static const ThemeBuilder kBuiltinThemes[] = {
     BuildNexusTheme,
@@ -2711,6 +2897,7 @@ static const ThemeBuilder kBuiltinThemes[] = {
     BuildSylvariGroveTheme,
     BuildDivinityReachTheme,
     BuildHoelbrakTheme,
+    BuildNyanCatTheme,
 };
 
 static void ScanThemes() {
@@ -3991,6 +4178,16 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Textures_GetOrCreateFromMemory(TEX_ICON,       (void*)ICON_DATA,       ICON_DATA_SIZE);
     APIDefs->Textures_GetOrCreateFromMemory(TEX_ICON_HOVER,  (void*)ICON_HOVER_DATA, ICON_HOVER_DATA_SIZE);
     APIDefs->Textures_LoadFromMemory(TEX_FLOAT_ICON,  (void*)FLOAT_ICON_DATA, FLOAT_ICON_DATA_SIZE, nullptr);
+
+    // Load Nyan Cat animation frames
+    for (int i = 0; i < NYAN_FRAME_COUNT; i++) {
+        char id[32];
+        snprintf(id, sizeof(id), "TEX_TYRIAN_NYAN_%02d", i);
+        s_NyanFrames[i] = APIDefs->Textures_GetOrCreateFromMemory(
+            id,
+            (void*)kNyanFrameData[i],
+            kNyanFrameSize[i]);
+    }
 
     // Register quick access shortcut
     if (g_ShowQAIcon) {
