@@ -3574,7 +3574,14 @@ static void RenderMessageArea() {
                     }
                     if (lClicked) {
                         if (seg.link.type == TyrianIM::GW2LinkType::Url) {
-                            ShellExecuteA(NULL, "open", seg.link.raw.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                            const std::string& url = seg.link.raw;
+                            bool safe = url.compare(0, 7, "http://")  == 0 ||
+                                        url.compare(0, 8, "https://") == 0;
+                            if (safe) {
+                                ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                                g_ClipboardMsg = "Opening in browser\xe2\x80\xa6";
+                                g_ClipboardMsgExpiry = ImGui::GetTime() + 2.0;
+                            }
                         } else {
                             std::string ctxt =
                                 (seg.link.type == TyrianIM::GW2LinkType::AE2Build &&
