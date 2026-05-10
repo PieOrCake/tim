@@ -535,8 +535,14 @@ static const unsigned char FLOAT_ICON_DATA[] = {
 };
 static const unsigned int FLOAT_ICON_DATA_SIZE = 3047;
 
-// Nyan Cat animation frame textures (populated in AddonLoad)
+// Nyan Cat animation frame textures (populated via LoadFromMemory callback)
 static Texture_t* s_NyanFrames[NYAN_FRAME_COUNT] = {};
+
+static void NyanFrameCallback(const char* aId, Texture_t* aTex) {
+    int i = atoi(aId + 16); // skip "TEX_TYRIAN_NYAN_"
+    if (i >= 0 && i < NYAN_FRAME_COUNT)
+        s_NyanFrames[i] = aTex;
+}
 
 // Global variables
 HMODULE hSelf;
@@ -4182,14 +4188,11 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Textures_GetOrCreateFromMemory(TEX_ICON_HOVER,  (void*)ICON_HOVER_DATA, ICON_HOVER_DATA_SIZE);
     APIDefs->Textures_LoadFromMemory(TEX_FLOAT_ICON,  (void*)FLOAT_ICON_DATA, FLOAT_ICON_DATA_SIZE, nullptr);
 
-    // Load Nyan Cat animation frames
+    // Load Nyan Cat animation frames (LoadFromMemory always reloads, bypassing stale cache)
     for (int i = 0; i < NYAN_FRAME_COUNT; i++) {
         char id[32];
         snprintf(id, sizeof(id), "TEX_TYRIAN_NYAN_%02d", i);
-        s_NyanFrames[i] = APIDefs->Textures_GetOrCreateFromMemory(
-            id,
-            (void*)kNyanFrameData[i],
-            kNyanFrameSize[i]);
+        APIDefs->Textures_LoadFromMemory(id, (void*)kNyanFrameData[i], kNyanFrameSize[i], NyanFrameCallback);
     }
 
     // Register quick access shortcut
