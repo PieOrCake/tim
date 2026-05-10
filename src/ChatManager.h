@@ -9,6 +9,7 @@
 #include <mutex>
 #include <cstdint>
 #include <ctime>
+#include "ChatLinks.h"
 
 namespace TyrianIM {
 
@@ -32,7 +33,9 @@ struct ChatMessage {
     uint64_t    epoch_ms;       // For sorting
     MessageDirection direction;
     MessageSource source;
-    bool failed = false;       // True if delivery failed (e.g. player offline)
+    bool failed    = false;    // True if delivery failed (e.g. player offline)
+    bool has_links = false;    // True when segments is populated
+    std::vector<Segment> segments; // non-empty only when has_links
 };
 
 struct Conversation {
@@ -76,6 +79,11 @@ public:
     // Merge a conversation keyed by old_key into one keyed by new_key
     // (e.g. character name → account name when account becomes available)
     static void MergeConversation(const std::string& old_key, const std::string& new_key);
+
+    // Update a resolved link segment (called from GW2API worker thread)
+    static void UpdateLinkSegment(const std::string& contact, size_t msg_idx, size_t seg_idx,
+                                   const std::string& display, const std::string& tooltip,
+                                   ImU32 colour, LinkState state);
 
     // Set the local player's account name
     static void SetSelfAccountName(const std::string& name);

@@ -1,6 +1,10 @@
 # Build output
 build/
 
+# LLM files
+CLAUDE.md
+handover.md
+
 # IDE
 .vscode/
 .idea/

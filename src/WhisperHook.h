@@ -84,6 +84,7 @@ namespace TyrianIM {
 using WhisperCallback = std::function<void(const std::string& sender, const std::string& recipient, const std::string& message, bool is_incoming)>;
 using ErrorCallback = std::function<void(const std::string& contact, const std::string& error_text)>;
 using NamePairCallback = std::function<void(const std::string& character_name, const std::string& account_name)>;
+using ChannelCallback = std::function<void(ChatMessageType type, ChatMetadataFlags flags, const std::string& charName, int guildIndex)>;
 
 enum class HookStatus {
     NotInitialized,
@@ -103,6 +104,7 @@ public:
     static void SetCallback(WhisperCallback callback);
     static void SetErrorCallback(ErrorCallback callback);
     static void SetNamePairCallback(NamePairCallback callback);
+    static void SetChannelCallback(ChannelCallback callback);
 
     static HookStatus GetStatus();
     static const char* GetStatusString();
@@ -118,6 +120,7 @@ private:
     static WhisperCallback s_Callback;
     static ErrorCallback s_ErrorCallback;
     static NamePairCallback s_NamePairCallback;
+    static ChannelCallback s_ChannelCallback;
     static HookStatus s_Status;
     static bool s_ProbeMode;
     static bool s_EventsSubscribed;

@@ -1,4 +1,5 @@
 #include "ChatManager.h"
+#include "ChatLinks.h"
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -55,6 +56,10 @@ void ChatManager::AddMessage(const ChatMessage& msg) {
         }
 
         convo_ptr->messages.push_back(msg);
+        auto& stored = convo_ptr->messages.back();
+        // Parse inline chat links (segments stored on the message itself)
+        stored.segments = ParseSegments(stored.text);
+        stored.has_links = !stored.segments.empty();
         convo_ptr->last_activity = msg.epoch_ms;
         s_SortDirty = true;
 
@@ -423,7 +428,9 @@ void ChatManager::LoadHistory() {
                     if (msg.direction == MessageDirection::Incoming && !msg.sender.empty()) {
                         convo_ptr->display_name = msg.sender;
                     }
-                    convo_ptr->messages.push_back(msg);
+                    auto& stored2 = convo_ptr->messages.emplace_back(msg);
+                    stored2.segments  = ParseSegments(stored2.text);
+                    stored2.has_links = !stored2.segments.empty();
                     if (msg.epoch_ms > convo_ptr->last_activity) {
                         convo_ptr->last_activity = msg.epoch_ms;
                     }
@@ -517,12 +524,31 @@ void ChatManager::LoadHistory() {
             if (msg.direction == MessageDirection::Incoming && !msg.sender.empty()) {
                 convo_ptr->display_name = msg.sender;
             }
-            convo_ptr->messages.push_back(msg);
+            auto& stored = convo_ptr->messages.emplace_back(msg);
+            stored.segments  = ParseSegments(stored.text);
+            stored.has_links = !stored.segments.empty();
             if (msg.epoch_ms > convo_ptr->last_activity) {
                 convo_ptr->last_activity = msg.epoch_ms;
             }
         }
     }
+}
+
+void ChatManager::UpdateLinkSegment(const std::string& contact, size_t msg_idx, size_t seg_idx,
+                                     const std::string& display, const std::string& tooltip,
+                                     ImU32 colour, LinkState state) {
+    std::lock_guard<std::mutex> lock(s_Mutex);
+    auto it = s_Conversations.find(contact);
+    if (it == s_Conversations.end()) return;
+    auto& msgs = it->second->messages;
+    if (msg_idx >= msgs.size()) return;
+    auto& segs = msgs[msg_idx].segments;
+    if (seg_idx >= segs.size() || !segs[seg_idx].is_link) return;
+    if (!display.empty())
+        segs[seg_idx].link.display  = display;
+    segs[seg_idx].link.tooltip_text = tooltip;
+    segs[seg_idx].link.colour       = colour;
+    segs[seg_idx].link.state        = state;
 }
 
 } // namespace TyrianIM

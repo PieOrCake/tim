@@ -37,6 +37,8 @@ set(SOURCES
     src/dllmain.cpp
     src/ChatManager.cpp
     src/WhisperHook.cpp
+    src/ChatLinks.cpp
+    src/GW2API.cpp
     ${IMGUI_SOURCES}
 )
 
@@ -45,6 +47,8 @@ set(HEADERS
     include/nexus/Nexus.h
     src/ChatManager.h
     src/WhisperHook.h
+    src/ChatLinks.h
+    src/GW2API.h
 )
 
 # Create shared library (DLL)
@@ -60,6 +64,7 @@ set_target_properties(TyrianIM PROPERTIES
 target_link_libraries(TyrianIM
     gdi32
     winmm
+    winhttp
 )
 
 # Module definition file for clean DLL export

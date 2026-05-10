@@ -10,6 +10,7 @@ AddonAPI_t* WhisperHook::s_API = nullptr;
 WhisperCallback WhisperHook::s_Callback = nullptr;
 ErrorCallback WhisperHook::s_ErrorCallback = nullptr;
 NamePairCallback WhisperHook::s_NamePairCallback = nullptr;
+ChannelCallback WhisperHook::s_ChannelCallback = nullptr;
 HookStatus WhisperHook::s_Status = HookStatus::NotInitialized;
 bool WhisperHook::s_ProbeMode = false;
 bool WhisperHook::s_EventsSubscribed = false;
@@ -108,7 +109,10 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
 
             if (msg->Type == ChatMsg_Guild) {
                 bool is_represented = (msg->Flags & ChatFlag_Guild_IsRepresented) != 0;
-                ProbeLog("IsRepresented: %s", is_represented ? "YES (/g)" : "NO (g1-g5?)");
+                const uint8_t* raw = (const uint8_t*)msg;
+                int guildIdx = (IsReadableMemory(raw + 0x38, 4)) ? (int)(*(const uint32_t*)(raw + 0x38)) : -1;
+                ProbeLog("GuildIndex:    %d (%s -> /g%d)", guildIdx,
+                    is_represented ? "represented" : "non-represented", guildIdx + 1);
             }
             if (msg->Type == ChatMsg_Whisper) {
                 bool from_me = (msg->Flags & ChatFlag_Whisper_IsFromMe) != 0;
@@ -137,7 +141,7 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
         switch (msg->Type) {
             case ChatMsg_Party:   gm = &msg->Party;   break;
             case ChatMsg_Squad:   gm = &msg->Squad;   break;
-            case ChatMsg_Guild:   gm = &msg->Local;   break;
+            case ChatMsg_Guild:   gm = &msg->Whisper; break; // no Guild field; union layout is identical
             case ChatMsg_Local:   gm = &msg->Local;   break;
             case ChatMsg_Map:     gm = &msg->Map;     break;
             case ChatMsg_TeamPvP: gm = &msg->TeamPvP; break;
@@ -149,6 +153,28 @@ void WhisperHook::OnEvChatMessage(void* eventArgs) {
             if (!cn.empty() && !an.empty() && cn != an) {
                 s_NamePairCallback(cn, an);
             }
+        }
+    }
+
+    // Track active channel — only types that have a known restore command
+    bool isTrackableChannel = (msg->Type == ChatMsg_Local  ||
+                               msg->Type == ChatMsg_Map    ||
+                               msg->Type == ChatMsg_Party  ||
+                               msg->Type == ChatMsg_Guild  ||
+                               msg->Type == ChatMsg_Squad  ||
+                               msg->Type == ChatMsg_TeamPvP ||
+                               msg->Type == ChatMsg_TeamWvW);
+    if (s_ChannelCallback && isTrackableChannel) {
+        ChatGenericMessage* gm = &msg->Whisper; // union — same offset for all GenericMessage types
+        if (gm->CharacterName && IsReadableMemory(gm->CharacterName, 1)) {
+            // Guild index lives at +0x38 (uint32 immediately after ChatGenericMessage in the payload)
+            int guildIdx = 0;
+            if (msg->Type == ChatMsg_Guild) {
+                const uint8_t* raw = (const uint8_t*)msg;
+                if (IsReadableMemory(raw + 0x38, 4))
+                    guildIdx = (int)(*(const uint32_t*)(raw + 0x38));
+            }
+            s_ChannelCallback(msg->Type, msg->Flags, gm->CharacterName, guildIdx);
         }
     }
 
@@ -373,6 +399,10 @@ void WhisperHook::SetErrorCallback(ErrorCallback callback) {
 
 void WhisperHook::SetNamePairCallback(NamePairCallback callback) {
     s_NamePairCallback = callback;
+}
+
+void WhisperHook::SetChannelCallback(ChannelCallback callback) {
+    s_ChannelCallback = callback;
 }
 
 HookStatus WhisperHook::GetStatus() {
