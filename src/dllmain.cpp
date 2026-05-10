@@ -556,6 +556,7 @@ static std::deque<UrlToast> g_UrlToastQueue;
 static std::mutex           g_UrlToastMutex;
 static bool                 g_UrlToastEnabled = true;
 static bool                 g_UrlToastLocked  = true;
+static bool                 g_UrlToastShowDummy = false;
 static float                g_UrlToastX       = -1.0f;
 static float                g_UrlToastY       = -1.0f;
 
@@ -3928,9 +3929,15 @@ static void RenderUrlToast() {
     if (!g_UrlToastEnabled) return;
 
     std::unique_lock<std::mutex> lk(g_UrlToastMutex);
-    if (g_UrlToastQueue.empty()) return;
-    UrlToast toast = g_UrlToastQueue.front();
+    bool hasReal = !g_UrlToastQueue.empty();
+    UrlToast toast;
+    if (hasReal) {
+        toast = g_UrlToastQueue.front();
+        g_UrlToastShowDummy = false; // real toast supersedes dummy
+    }
     lk.unlock();
+
+    if (!hasReal && !g_UrlToastShowDummy) return;
 
     ImGuiIO& io = ImGui::GetIO();
     constexpr float kW = 320.0f, kH = 94.0f, kMargin = 16.0f;
@@ -3952,6 +3959,21 @@ static void RenderUrlToast() {
         flags |= ImGuiWindowFlags_NoMove;
 
     if (ImGui::Begin("##UrlToast", nullptr, flags)) {
+        if (!hasReal) {
+            // Dummy toast for position adjustment
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+            ImGui::TextUnformatted("[Map] Example.1234 shared a link");
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.7f, 1.0f, 1.0f));
+            ImGui::TextUnformatted("example.com");
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            if (ImGui::Button("Done — Lock Position")) {
+                g_UrlToastLocked    = true;
+                g_UrlToastShowDummy = false;
+                SaveSettings();
+            }
+        } else {
         std::string header = std::string("[") + ChanTypeName(toast.chanType) + "] "
                            + toast.charName + " shared a link";
         ImGui::TextUnformatted(header.c_str());
@@ -3974,6 +3996,7 @@ static void RenderUrlToast() {
             std::lock_guard<std::mutex> lk2(g_UrlToastMutex);
             g_UrlToastQueue.pop_front();
         }
+        } // end else (real toast)
 
         if (!g_UrlToastLocked) {
             ImVec2 pos = ImGui::GetWindowPos();
@@ -4161,6 +4184,13 @@ void AddonOptions() {
     if (g_UrlToastEnabled) {
         ImGui::Indent();
         if (ImGui::Checkbox("Lock position##UrlToast", &g_UrlToastLocked)) {
+            if (!g_UrlToastLocked) {
+                std::lock_guard<std::mutex> lk(g_UrlToastMutex);
+                if (g_UrlToastQueue.empty())
+                    g_UrlToastShowDummy = true;
+            } else {
+                g_UrlToastShowDummy = false;
+            }
             settings_changed = true;
         }
         ImGui::Unindent();
