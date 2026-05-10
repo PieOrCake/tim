@@ -2151,47 +2151,56 @@ static void NyanCatStars(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
     float t = (float)ImGui::GetTime();
     float w = mx.x - mn.x;
     float h = mx.y - mn.y;
-    constexpr float kCycle  = 2.5f;
-    constexpr ImU32 kWhite  = IM_COL32(255, 255, 255, 220);
+    constexpr float kCycle    = 2.5f;
+    constexpr float kBaseSpeed = 55.0f; // px/sec base scroll speed (right to left)
+    constexpr ImU32 kWhite    = IM_COL32(255, 255, 255, 220);
     constexpr float kAngles[8] = {
         0.000f, 0.785f, 1.571f, 2.356f,
         3.142f, 3.927f, 4.712f, 5.498f
     };
 
     for (int i = 0; i < count; i++) {
-        float phi   = i * 0.6180339f;
-        float psi   = i * 0.3819660f;
-        float phase = i * (kCycle / count);
-        float frac  = fmodf(t + phase, kCycle) / kCycle;
+        float phi  = i * 0.6180339f;  // golden ratio — spreads y positions
+        float psi  = i * 0.3819660f;  // spreads x offsets and speeds
 
-        int   seed = (int)((t + phase) / kCycle);
-        float sx   = mn.x + fmodf(phi * (float)(seed * 7 + 3), 1.0f) * w;
-        float sy   = mn.y + fmodf(psi * (float)(seed * 13 + 5), 1.0f) * h;
+        // Fixed y per star, scrolling x (right to left, wraps at left edge)
+        float speed  = kBaseSpeed * (0.6f + 0.8f * fmodf(psi * 7.3f, 1.0f));
+        float x0     = fmodf(phi * w * 2.0f, w);        // staggered start
+        float sx     = mx.x - fmodf(t * speed + x0, w); // scrolls left, wraps
+        float sy     = mn.y + fmodf(phi * h * 1.618f, h);
+
+        // Twinkling cycle — independent of scroll position
+        float phase = i * (kCycle / count);
+        float frac  = fmodf(t * 0.7f + phase, kCycle) / kCycle;
 
         if (frac < 0.15f) {
-            dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + 2, sy + 2), kWhite);
+            // Stage 1: 4×4 dot
+            dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + 4, sy + 4), kWhite);
         } else if (frac < 0.35f) {
-            dl->AddRectFilled(ImVec2(sx - 1, sy - 1), ImVec2(sx + 2, sy + 2), kWhite);
-            dl->AddRectFilled(ImVec2(sx,     sy - 2), ImVec2(sx + 1, sy - 1), kWhite);
-            dl->AddRectFilled(ImVec2(sx,     sy + 2), ImVec2(sx + 1, sy + 3), kWhite);
-            dl->AddRectFilled(ImVec2(sx - 2, sy    ), ImVec2(sx - 1, sy + 1), kWhite);
-            dl->AddRectFilled(ImVec2(sx + 2, sy    ), ImVec2(sx + 3, sy + 1), kWhite);
+            // Stage 2: 6×6 centre + 2px arms
+            dl->AddRectFilled(ImVec2(sx - 2, sy - 2), ImVec2(sx + 4, sy + 4), kWhite);
+            dl->AddRectFilled(ImVec2(sx,     sy - 4), ImVec2(sx + 2, sy - 2), kWhite);
+            dl->AddRectFilled(ImVec2(sx,     sy + 4), ImVec2(sx + 2, sy + 6), kWhite);
+            dl->AddRectFilled(ImVec2(sx - 4, sy    ), ImVec2(sx - 2, sy + 2), kWhite);
+            dl->AddRectFilled(ImVec2(sx + 4, sy    ), ImVec2(sx + 6, sy + 2), kWhite);
         } else if (frac < 0.60f) {
-            dl->AddRectFilled(ImVec2(sx - 1, sy - 1), ImVec2(sx + 2, sy + 2), kWhite);
-            for (int a = 2; a <= 5; a++) {
-                dl->AddRectFilled(ImVec2(sx,         sy - a    ), ImVec2(sx + 1, sy - a + 1), kWhite);
-                dl->AddRectFilled(ImVec2(sx,         sy + a - 1), ImVec2(sx + 1, sy + a    ), kWhite);
-                dl->AddRectFilled(ImVec2(sx - a,     sy        ), ImVec2(sx - a + 1, sy + 1), kWhite);
-                dl->AddRectFilled(ImVec2(sx + a - 1, sy        ), ImVec2(sx + a,     sy + 1), kWhite);
+            // Stage 3: 6×6 centre + 8px arms
+            dl->AddRectFilled(ImVec2(sx - 2, sy - 2), ImVec2(sx + 4, sy + 4), kWhite);
+            for (int a = 4; a <= 10; a += 2) {
+                dl->AddRectFilled(ImVec2(sx,         sy - a    ), ImVec2(sx + 2, sy - a + 2), kWhite);
+                dl->AddRectFilled(ImVec2(sx,         sy + a - 2), ImVec2(sx + 2, sy + a    ), kWhite);
+                dl->AddRectFilled(ImVec2(sx - a,     sy        ), ImVec2(sx - a + 2, sy + 2), kWhite);
+                dl->AddRectFilled(ImVec2(sx + a - 2, sy        ), ImVec2(sx + a,     sy + 2), kWhite);
             }
         } else if (frac < 0.80f) {
+            // Stage 4: ring at radius 8, 2×2 dots
             for (float ang : kAngles) {
-                float rx = sx + cosf(ang) * 4.0f;
-                float ry = sy + sinf(ang) * 4.0f;
-                dl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 1, ry + 1), kWhite);
+                float rx = sx + cosf(ang) * 8.0f;
+                float ry = sy + sinf(ang) * 8.0f;
+                dl->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 2, ry + 2), kWhite);
             }
         }
-        // frac 0.80–1.0: invisible, position reseeds next cycle
+        // Stage 5 (frac 0.80–1.0): invisible
     }
 }
 
