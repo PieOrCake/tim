@@ -2152,7 +2152,7 @@ static void NyanCatStars(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
     float w = mx.x - mn.x;
     float h = mx.y - mn.y;
     constexpr float kCycle    = 2.5f;
-    constexpr float kBaseSpeed = 55.0f; // px/sec base scroll speed (right to left)
+    constexpr float kBaseSpeed = 82.5f; // px/sec base scroll speed (right to left)
     constexpr ImU32 kWhite    = IM_COL32(255, 255, 255, 220);
     constexpr float kAngles[8] = {
         0.000f, 0.785f, 1.571f, 2.356f,
