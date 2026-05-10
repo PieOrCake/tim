@@ -10,11 +10,17 @@ OUTFILE="$3"
 
 FRAME_COUNT=$(identify -format '%n\n' "$GIF" | head -1)
 
-# Split all GIF frames (coalesced)
-convert "$GIF" -coalesce +adjoin "$BUILDDIR/nyan_frame_%02d.png"
+# Split all GIF frames (coalesced), then remove the blue sky background
+magick "$GIF" -coalesce +adjoin "$BUILDDIR/nyan_frame_raw_%02d.png"
 
 LAST=$(( FRAME_COUNT - 1 ))
 LAST_PADDED=$(printf "%02d" "$LAST")
+
+for i in $(seq -w 0 "$LAST_PADDED"); do
+    magick "$BUILDDIR/nyan_frame_raw_${i}.png" \
+        -fuzz 18% -transparent "#042957" \
+        "$BUILDDIR/nyan_frame_${i}.png"
+done
 
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT

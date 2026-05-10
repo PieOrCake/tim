@@ -2230,13 +2230,18 @@ static void NyanCatDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
     float w = mx.x - mn.x;
     float h = mx.y - mn.y;
 
-    float cat_h        = h * 0.38f;
-    float cat_w        = cat_h * (498.0f / 280.0f);
-    float cat_left     = mn.x + w * 0.50f;
-    float cat_top      = mn.y + h * 0.48f - cat_h * 0.5f;
-    float cat_center_y = cat_top + cat_h * 0.45f;
+    // Fit the sprite within the panel maintaining 498:280 aspect ratio
+    // Scale to fill width; if that makes it too tall, scale to height instead
+    float scale  = w / 498.0f;
+    float cat_w  = w;
+    float cat_h  = 280.0f * scale;
+    if (cat_h > h * 0.55f) {
+        cat_h = h * 0.55f;
+        cat_w = cat_h * (498.0f / 280.0f);
+    }
 
-    NyanCatRainbow(dl, mn, cat_left, cat_center_y);
+    float cat_left = mn.x + (w - cat_w) * 0.5f;
+    float cat_top  = mn.y + h * 0.5f - cat_h * 0.5f;
 
     int        frame = (int)((float)ImGui::GetTime() / 0.05f) % NYAN_FRAME_COUNT;
     Texture_t* tex   = s_NyanFrames[frame];
@@ -2244,9 +2249,7 @@ static void NyanCatDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
         dl->AddImage(
             (ImTextureID)tex->Resource,
             ImVec2(cat_left, cat_top),
-            ImVec2(cat_left + cat_w, cat_top + cat_h),
-            ImVec2(0.25f, 0.0f),
-            ImVec2(1.0f,  1.0f));
+            ImVec2(cat_left + cat_w, cat_top + cat_h));
     }
 
     NyanCatStars(dl, mn, mx, 20);
