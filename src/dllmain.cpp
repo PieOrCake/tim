@@ -3330,49 +3330,98 @@ static TyrianTheme BuildCandlelightTheme() {
 // ── Barbie draw hooks ────────────────────────────────────────────────────────
 
 static void BarbieDrawHeart(ImDrawList* dl, float cx, float cy, float r, ImU32 col) {
-    float hw = r * 0.52f;
-    dl->AddCircleFilled(ImVec2(cx - hw, cy - r * 0.18f), r * 0.68f, col, 12);
-    dl->AddCircleFilled(ImVec2(cx + hw, cy - r * 0.18f), r * 0.68f, col, 12);
-    ImVec2 pts[3] = {
-        ImVec2(cx - r * 1.05f, cy + r * 0.08f),
-        ImVec2(cx + r * 1.05f, cy + r * 0.08f),
-        ImVec2(cx,             cy + r * 1.15f),
-    };
-    dl->AddTriangleFilled(pts[0], pts[1], pts[2], col);
+    // Parametric heart curve — single polygon, no overlapping shapes, no seam lines.
+    // Formula: x=16sin³t, y=-(13cos(t)-5cos(2t)-2cos(3t)-cos(4t))
+    // Scaled so the heart fits within radius r. Slight downward offset centres it visually.
+    const int  N  = 32;
+    const float sc = r / 13.5f;
+    const float oy = r * 0.08f;
+    ImVec2 pts[N], hpts[N];
+    for (int i = 0; i < N; i++) {
+        // Start at the bottom tip (t=π) so the convex fan radiates outward from there,
+        // keeping the concave top-V artifact in a small area rather than a centre line.
+        float t = ((float)(i + N / 2) / (float)N) * 6.28318f;
+        float x =  16.0f * sinf(t)*sinf(t)*sinf(t);
+        float y = -(13.0f*cosf(t) - 5.0f*cosf(2*t) - 2.0f*cosf(3*t) - cosf(4*t));
+        pts[i]  = ImVec2(cx + x * sc,         cy + y * sc         + oy);
+        hpts[i] = ImVec2(cx + x * sc * 1.20f, cy + y * sc * 1.20f + oy);
+    }
+    ImVec4 cf   = ImGui::ColorConvertU32ToFloat4(col);
+    ImU32  halo = ImGui::ColorConvertFloat4ToU32(ImVec4(cf.x, cf.y, cf.z, cf.w * 0.25f));
+    dl->AddConvexPolyFilled(hpts, N, halo);
+    dl->AddConvexPolyFilled(pts,  N, col);
 }
 
 static void BarbieHearts(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
     float w = mx.x - mn.x, h = mx.y - mn.y;
     float t = (float)ImGui::GetTime();
+
+    // Deterministic hash: maps two ints to a float in [0, 1)
+    auto hashF = [](int a, int b) -> float {
+        unsigned int h = (unsigned int)(a * 1973 + b * 9781 + 31);
+        h ^= (h >> 16); h *= 0x45d9f3bu; h ^= (h >> 16);
+        return (float)(h & 0xFFFFu) / 65536.0f;
+    };
+
+    // Jiggle slot: exactly one eligible heart (every 5th) jiggles at a time.
+    // Each gets a 4-second window; it jiggles for the first 1.4s, then is quiet.
+    int   eligibleCount = (count + 4) / 5;
+    if (eligibleCount < 1) eligibleCount = 1;
+    float jiggWindowLen  = 4.0f;
+    float jiggDur        = 1.4f;
+    float jiggCycle      = jiggWindowLen * (float)eligibleCount;
+    float globalJigT     = fmodf(t, jiggCycle);
+    int   activeSlot     = (int)(globalJigT / jiggWindowLen);
+    bool  slotActive     = fmodf(globalJigT, jiggWindowLen) < jiggDur;
+
     for (int i = 0; i < count; i++) {
         float phi = fmodf(i * 0.6180339f, 1.0f);
         float psi = fmodf(i * 0.7548777f, 1.0f);
 
-        // Quadratic skew: most hearts are small, a few are large (4–14px radius)
-        float r = 4.0f + phi * phi * 10.0f;
+        float r  = 14.0f + phi * phi * 10.0f;  // size: quadratic skew, 14–24px
+        float hx = mn.x + phi * w;              // home x
+        float hy = mn.y + psi * h;              // home y
+        float ax = 22.0f + phi * 28.0f;         // wander amplitude x
+        float ay = 18.0f + psi * 24.0f;         // wander amplitude y
 
-        // Home position distributed evenly across the panel
-        float hx = mn.x + phi * w;
-        float hy = mn.y + psi * h;
+        // Each heart has 10 direction epochs of varying length (2–15s each).
+        // Lengths are derived from a hash so they differ per heart and per epoch.
+        // The total cycle length varies per heart, keeping them desynchronised.
+        constexpr int kEpochs = 10;
+        float lens[kEpochs];
+        float totalCycle_i = 0.0f;
+        for (int j = 0; j < kEpochs; j++) {
+            lens[j] = 2.0f + hashF(i * 17 + j, 3) * 13.0f; // 2–15s
+            totalCycle_i += lens[j];
+        }
 
-        // Wander amplitude scales with heart size
-        float ax = 22.0f + phi * 28.0f;
-        float ay = 18.0f + psi * 24.0f;
+        // Find the current epoch for this heart
+        float heartT    = fmodf(t, totalCycle_i);
+        int   epoch     = kEpochs - 1;
+        float epochStart = 0.0f;
+        float acc = 0.0f;
+        for (int j = 0; j < kEpochs; j++) {
+            if (heartT < acc + lens[j]) { epoch = j; epochStart = acc; break; }
+            acc += lens[j];
+        }
+        float epochPhase = (heartT - epochStart) / lens[epoch]; // [0, 1)
 
-        // Unique Lissajous frequencies — non-repeating wandering paths
-        float fx = 0.12f + phi * 0.18f;
-        float fy = 0.09f + psi * 0.15f;
+        // Direction for this epoch (unique angle per heart+epoch combination)
+        float angle = hashF(i * 17 + epoch, 7) * 6.28318f;
+        float perp  = angle + 1.5708f; // perpendicular, for a non-linear return path
 
-        float px = hx + ax * sinf(t * fx + phi * 6.28f);
-        float py = hy + ay * sinf(t * fy + psi * 6.28f + 1.1f);
+        // Sine envelope: zero speed at epoch boundaries, max in the middle.
+        // This makes the heart decelerate, pause briefly, then accelerate in a new direction.
+        float mainEnv = sinf(epochPhase * 3.14159f);
+        float wobble  = sinf(epochPhase * 6.28318f * (1.0f + hashF(i * 17 + epoch, 11) * 0.5f)) * 0.35f;
 
-        // Occasional jiggle for every 5th heart when slow pulse peaks
-        if (i % 5 == 0) {
-            float jiggPulse = 0.5f + 0.5f * sinf(t * 0.35f + phi * 4.2f);
-            if (jiggPulse > 0.82f) {
-                px += sinf(t * 14.0f + phi * 7.0f) * 3.5f;
-                py += sinf(t * 11.0f + phi * 5.3f) * 2.5f;
-            }
+        float px = hx + (cosf(angle) * mainEnv + cosf(perp) * wobble) * ax;
+        float py = hy + (sinf(angle) * mainEnv + sinf(perp) * wobble) * ay;
+
+        // Jiggle: only the active slot's heart, one at a time
+        if (i % 5 == 0 && (i / 5) == activeSlot && slotActive) {
+            px += sinf(t * 14.0f + phi * 7.0f) * 3.5f;
+            py += sinf(t * 11.0f + phi * 5.3f) * 2.5f;
         }
 
         // Clip to panel
@@ -3380,26 +3429,84 @@ static void BarbieHearts(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
         py = fmaxf(mn.y + r, fminf(mx.y - r, py));
 
         float pulse = 0.45f + 0.55f * sinf(t * 0.8f + phi * 5.0f);
-        int   a     = (int)(12 + pulse * 28);
-        int   pick  = i % 3;
-        ImU32 col   = (pick == 0) ? IM_COL32(255,  20, 120, a)
-                    : (pick == 1) ? IM_COL32(220,   0,  90, a)
-                                  : IM_COL32(255,  80, 160, a);
+        int   a     = (int)(120 + pulse * 80);
+        ImU32 col   = IM_COL32(255, 20, 120, a);
         BarbieDrawHeart(dl, px, py, r, col);
     }
 }
 
+static void BarbieSparkles(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t = (float)ImGui::GetTime();
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+
+    auto hashF = [](int a, int b) -> float {
+        unsigned int hv = (unsigned int)(a * 1973 + b * 9781 + 31);
+        hv ^= (hv >> 16); hv *= 0x45d9f3bu; hv ^= (hv >> 16);
+        return (float)(hv & 0xFFFFu) / 65536.0f;
+    };
+
+    const int   NUM_SLOTS  = 2;
+    const float SPARK_DUR  = 0.65f;
+    const int   MAX_EPOCHS = 128;
+
+    for (int slot = 0; slot < NUM_SLOTS; slot++) {
+        // Stagger each slot's clock so they don't fire simultaneously
+        float ts = t + hashF(slot * 7, 99) * 12.0f;
+
+        float epochT = 0.0f;
+        for (int j = 0; j < MAX_EPOCHS; j++) {
+            float gap      = 5.0f + hashF(slot * 100 + j, 13) * 15.0f; // 5–20s between sparkles
+            float cycleLen = gap + SPARK_DUR;
+            if (ts < epochT + cycleLen) {
+                float localT = ts - epochT;
+                if (localT >= gap) {
+                    float phase = (localT - gap) / SPARK_DUR;         // 0 → 1
+                    float env   = sinf(phase * 3.14159f);              // smooth in/out
+                    float size  = env * (5.0f + hashF(slot * 17 + j, 5) * 6.0f); // 5–11px arms
+                    int   a     = (int)(env * 235);
+                    if (a > 0 && size > 0.5f) {
+                        float sx = mn.x + (0.08f + hashF(slot * 17 + j, 2) * 0.84f) * w;
+                        float sy = mn.y + (0.08f + hashF(slot * 17 + j, 3) * 0.84f) * h;
+                        ImU32 col  = IM_COL32(255, 210, 235, a);
+                        ImU32 core = IM_COL32(255, 255, 255, a);
+                        float thick = fmaxf(1.0f, size * 0.14f);
+                        // Main cross
+                        dl->AddLine(ImVec2(sx - size, sy),        ImVec2(sx + size, sy),        col, thick);
+                        dl->AddLine(ImVec2(sx,        sy - size),  ImVec2(sx,        sy + size),  col, thick);
+                        // Diagonal arms (60% length)
+                        float ds = size * 0.6f;
+                        dl->AddLine(ImVec2(sx - ds, sy - ds), ImVec2(sx + ds, sy + ds), col, thick * 0.7f);
+                        dl->AddLine(ImVec2(sx + ds, sy - ds), ImVec2(sx - ds, sy + ds), col, thick * 0.7f);
+                        // Bright centre dot
+                        dl->AddCircleFilled(ImVec2(sx, sy), fmaxf(1.2f, thick * 1.8f), core, 8);
+                    }
+                }
+                break;
+            }
+            epochT += cycleLen;
+        }
+    }
+}
+
 static void BarbieDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t = (float)ImGui::GetTime();
     float h = mx.y - mn.y;
     dl->AddRectFilledMultiColor(
         ImVec2(mn.x, mx.y - h * 0.30f), mx,
         IM_COL32(0, 0, 0, 0),       IM_COL32(0, 0, 0, 0),
         IM_COL32(180, 0, 80, 30),   IM_COL32(180, 0, 80, 30));
-    BarbieHearts(dl, mn, mx, 22);
+    BarbieHearts(dl, mn, mx, 14);
+    BarbieSparkles(dl, mn, mx);
+    // pulsing pink border
+    int ba = (int)(55 + 0.5f * (1.0f + sinf(t * 1.4f)) * 110);
+    dl->AddRect(mn, mx, IM_COL32(255, 80, 160, ba), 0.0f, 0, 2.0f);
 }
 
 static void BarbieDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
-    BarbieHearts(dl, mn, mx, 8);
+    float t  = (float)ImGui::GetTime();
+    BarbieHearts(dl, mn, mx, 5);
+    int ba = (int)(55 + 0.5f * (1.0f + sinf(t * 1.4f)) * 110);
+    dl->AddRect(mn, mx, IM_COL32(255, 80, 160, ba), 0.0f, 0, 2.0f);
 }
 
 // ── Barbie theme builder ─────────────────────────────────────────────────────
@@ -3437,8 +3544,12 @@ static TyrianTheme BuildBarbieTheme() {
     c[ImGuiCol_CheckMark]            = ImVec4(1.00f, 0.40f, 0.75f, 1.00f);
     c[ImGuiCol_SliderGrab]           = ImVec4(0.90f, 0.15f, 0.55f, 0.85f);
 
-    t.bubble_self      = IM_COL32(210,  20, 100, 215);
-    t.bubble_other     = IM_COL32(255, 170, 210, 200);
+    t.bubble_self      = IM_COL32(220,  45, 130, 220);
+    t.bubble_self_top  = IM_COL32(240,  70, 150, 225);
+    t.bubble_self_bot  = IM_COL32(190,  25, 105, 225);
+    t.bubble_other     = IM_COL32(100,  50, 185, 215);
+    t.bubble_other_top = IM_COL32(125,  70, 210, 220);
+    t.bubble_other_bot = IM_COL32( 75,  30, 155, 220);
     t.bubble_rounding  = 12.0f;
     t.header_bg        = IM_COL32(140,   8,  55, 255);
     t.active_bg        = IM_COL32(180,  15,  80, 185);
