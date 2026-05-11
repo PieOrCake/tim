@@ -26,6 +26,13 @@
 #include "ChatLinks.h"
 #include "GW2API.h"
 #include "nyancat_frames.h"
+#include "floatingcat.h"
+#include "floatingcharr.h"
+#include "floatinggolem.h"
+#include "floatingc64.h"
+#include "floatingjellyfish.h"
+#include "floatingcandle.h"
+#include "floatingtiara.h"
 
 // Version constants
 #define V_MAJOR 0
@@ -538,11 +545,46 @@ static const unsigned int FLOAT_ICON_DATA_SIZE = 3047;
 
 // Nyan Cat animation frame textures (populated via LoadFromMemory callback)
 static Texture_t* s_NyanFrames[NYAN_FRAME_COUNT] = {};
+static Texture_t* s_NyanFloatIcon       = nullptr;
+static Texture_t* s_CharrFloatIcon      = nullptr;
+static Texture_t* s_GolemFloatIcon      = nullptr;
+static Texture_t* s_C64FloatIcon        = nullptr;
+static Texture_t* s_JellyfishFloatIcon  = nullptr;
+static Texture_t* s_CandleFloatIcon     = nullptr;
+static Texture_t* s_TiaraFloatIcon      = nullptr;
 
 static void NyanFrameCallback(const char* aId, Texture_t* aTex) {
     int i = atoi(aId + 16); // skip "TEX_TYRIAN_NYAN_"
     if (i >= 0 && i < NYAN_FRAME_COUNT)
         s_NyanFrames[i] = aTex;
+}
+
+static void NyanIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_NyanFloatIcon = aTex;
+}
+
+static void CharrIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_CharrFloatIcon = aTex;
+}
+
+static void GolemIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_GolemFloatIcon = aTex;
+}
+
+static void C64IconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_C64FloatIcon = aTex;
+}
+
+static void JellyfishIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_JellyfishFloatIcon = aTex;
+}
+
+static void CandleIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_CandleFloatIcon = aTex;
+}
+
+static void TiaraIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_TiaraFloatIcon = aTex;
 }
 
 // URL toast notification queue
@@ -2945,6 +2987,482 @@ static TyrianTheme BuildNyanCatTheme() {
     return t;
 }
 
+// ── Commodore 64 draw hooks ──────────────────────────────────────────────────
+
+static void C64DrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    dl->AddRectFilledMultiColor(
+        mn, ImVec2(mx.x, mn.y + h * 0.35f),
+        IM_COL32(0, 0, 20, 40), IM_COL32(0, 0, 20, 40),
+        IM_COL32(0, 0,  0,  0), IM_COL32(0, 0,  0,  0));
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.25f), mx,
+        IM_COL32(0, 0,  0,  0), IM_COL32(0, 0,  0,  0),
+        IM_COL32(0, 0, 20, 30), IM_COL32(0, 0, 20, 30));
+    float scanY = fmodf(t * 70.0f, h);
+    dl->AddRectFilled(ImVec2(mn.x, mn.y + scanY),
+                      ImVec2(mx.x, mn.y + scanY + 2.0f),
+                      IM_COL32(200, 220, 255, 10));
+    float scan2Y = fmodf(scanY + 60.0f, h);
+    dl->AddRectFilled(ImVec2(mn.x, mn.y + scan2Y),
+                      ImVec2(mx.x, mn.y + scan2Y + 1.0f),
+                      IM_COL32(200, 220, 255, 6));
+}
+
+static void C64DrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    float scanY = fmodf(t * 70.0f, h);
+    dl->AddRectFilled(ImVec2(mn.x, mn.y + scanY),
+                      ImVec2(mx.x, mn.y + scanY + 2.0f),
+                      IM_COL32(200, 220, 255, 8));
+}
+
+// ── Underwater draw hooks ────────────────────────────────────────────────────
+
+static void UnderwaterBubbles(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi    = i * 0.6180339f;
+        float speed  = 14.0f + phi * 22.0f;
+        float wobble = sinf(t * 0.5f + phi * 6.0f) * 10.0f;
+        float px     = mn.x + fmodf(phi * w * 1.7f + wobble, w);
+        float py     = mx.y - fmodf(t * speed + phi * h, h);
+        float pulse  = 0.4f + 0.6f * sinf(t * 1.4f + phi * 5.0f);
+        float r      = 1.0f + pulse * 2.0f;
+        int   a      = (int)(8 + pulse * 22);
+        ImU32 col    = (i % 2 == 0) ? IM_COL32(180, 230, 255, a)
+                                     : IM_COL32(220, 245, 255, a);
+        dl->AddCircleFilled(ImVec2(px, py), r, col);
+        if (i % 5 == 0 && pulse > 0.7f)
+            dl->AddCircleFilled(ImVec2(px, py), r * 2.5f,
+                IM_COL32(180, 230, 255, (int)(a * 0.25f)));
+    }
+}
+
+static void UnderwaterShimmer(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    float bandH = h * 0.15f;
+    struct Layer { float freq, speed; ImU32 col; };
+    const Layer layers[] = {
+        { 2.4f, 0.18f, IM_COL32(100, 200, 255, 10) },
+        { 1.7f, 0.25f, IM_COL32(200, 240, 255,  8) },
+    };
+    constexpr int segs = 20;
+    for (auto& l : layers) {
+        float segW = w / (float)segs;
+        for (int i = 0; i < segs; i++) {
+            float x0 = mn.x + i * segW, x1 = x0 + segW + 1.0f;
+            float p0 = (float)i / segs, p1 = (float)(i + 1) / segs;
+            float y0 = mn.y + bandH * (0.3f + 0.7f * sinf(l.freq * p0 * 2.0f * 3.14159f + t * l.speed));
+            float y1 = mn.y + bandH * (0.3f + 0.7f * sinf(l.freq * p1 * 2.0f * 3.14159f + t * l.speed));
+            ImVec2 tl(x0, y0), tr(x1, y1);
+            ImVec2 bl(x0, y0 + bandH * 0.4f), br(x1, y1 + bandH * 0.4f);
+            dl->AddTriangleFilled(tl, tr, br, l.col);
+            dl->AddTriangleFilled(tl, br, bl, l.col);
+        }
+    }
+}
+
+static void UnderwaterDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    UnderwaterShimmer(dl, mn, mx);
+    UnderwaterBubbles(dl, mn, mx, 22);
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.22f), mx,
+        IM_COL32(0, 0,  0,  0), IM_COL32(0, 0,  0,  0),
+        IM_COL32(0, 5, 20, 35), IM_COL32(0, 5, 20, 35));
+}
+
+static void UnderwaterDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    UnderwaterBubbles(dl, mn, mx, 8);
+}
+
+// ── Candlelight draw hooks ───────────────────────────────────────────────────
+
+static void CandleEmbers(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi   = i * 0.6180339f;
+        float speed = 30.0f + phi * 30.0f;
+        float drift = sinf(t * 3.0f + phi * 8.0f) * 12.0f;
+        float px    = mn.x + fmodf(phi * w * 2.1f + drift, w);
+        float py    = mx.y - fmodf(t * speed + phi * h, h);
+        float pulse = 0.3f + 0.7f * sinf(t * 2.5f + phi * 7.0f);
+        float r     = 0.5f + pulse * 1.0f;
+        int   a     = (int)(10 + pulse * 35);
+        int   pick  = i % 3;
+        ImU32 col   = (pick == 0) ? IM_COL32(255, 160, 40, a)
+                    : (pick == 1) ? IM_COL32(255, 100, 20, a)
+                                  : IM_COL32(255, 200, 80, a);
+        dl->AddCircleFilled(ImVec2(px, py), r, col);
+        if (i % 6 == 0 && pulse > 0.8f)
+            dl->AddCircleFilled(ImVec2(px, py), r * 2.2f,
+                IM_COL32(255, 140, 30, (int)(a * 0.20f)));
+    }
+}
+
+static void CandleFlicker(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    float flicker = 0.7f + 0.3f * sinf(t * 9.0f + sinf(t * 13.7f) * 0.5f);
+    int   alpha   = (int)(flicker * 32);
+    float cx      = mn.x + w * 0.5f;
+    float cw      = w * 0.5f;
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.30f), mx,
+        IM_COL32(0, 0, 0, 0),        IM_COL32(0, 0, 0, 0),
+        IM_COL32(80, 35, 5, alpha),   IM_COL32(80, 35, 5, alpha));
+    dl->AddRectFilledMultiColor(
+        ImVec2(cx - cw * 0.5f, mx.y - h * 0.20f),
+        ImVec2(cx + cw * 0.5f, mx.y),
+        IM_COL32(0, 0, 0, 0),         IM_COL32(0, 0, 0, 0),
+        IM_COL32(120, 55, 8, alpha),  IM_COL32(120, 55, 8, alpha));
+}
+
+static void CandlelightDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    CandleFlicker(dl, mn, mx);
+    CandleEmbers(dl, mn, mx, 16);
+    dl->AddRectFilledMultiColor(
+        mn, ImVec2(mx.x, mn.y + h * 0.07f),
+        IM_COL32(8, 4, 2, 50), IM_COL32(8, 4, 2, 50),
+        IM_COL32(0, 0, 0,  0), IM_COL32(0, 0, 0,  0));
+}
+
+static void CandlelightDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    CandleEmbers(dl, mn, mx, 6);
+}
+
+// ── Commodore 64 theme builder ───────────────────────────────────────────────
+
+static TyrianTheme BuildC64Theme() {
+    TyrianTheme t;
+    t.name        = "Commodore 64";
+    t.description = "Dark blue-purple VIC-II palette, cream keys, scrolling CRT scanlines";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+    s.WindowRounding = s.ChildRounding = s.FrameRounding = s.PopupRounding = 0.0f;
+    s.ScrollbarRounding = s.GrabRounding = s.TabRounding = 0.0f;
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]        = ImVec4(0.07f, 0.05f, 0.22f, 0.98f);
+    c[ImGuiCol_ChildBg]         = ImVec4(0.09f, 0.06f, 0.28f, 0.78f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.08f, 0.05f, 0.24f, 0.96f);
+    c[ImGuiCol_Border]          = ImVec4(0.35f, 0.35f, 0.65f, 0.50f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.10f, 0.07f, 0.32f, 0.85f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.15f, 0.12f, 0.45f, 0.85f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.20f, 0.15f, 0.55f, 0.85f);
+    c[ImGuiCol_TitleBg]         = ImVec4(0.07f, 0.05f, 0.22f, 1.00f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.12f, 0.08f, 0.38f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.05f, 0.04f, 0.16f, 0.85f);
+    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.30f, 0.30f, 0.65f, 0.80f);
+    c[ImGuiCol_Button]          = ImVec4(0.20f, 0.18f, 0.55f, 0.85f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.30f, 0.28f, 0.70f, 0.90f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(0.40f, 0.38f, 0.80f, 1.00f);
+    c[ImGuiCol_Header]          = ImVec4(0.25f, 0.22f, 0.62f, 0.80f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.32f, 0.28f, 0.72f, 0.85f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.40f, 0.36f, 0.82f, 1.00f);
+    c[ImGuiCol_Separator]       = ImVec4(0.30f, 0.28f, 0.55f, 0.50f);
+    c[ImGuiCol_Text]            = ImVec4(0.80f, 0.80f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.40f, 0.38f, 0.65f, 1.00f);
+    c[ImGuiCol_CheckMark]       = ImVec4(0.79f, 0.83f, 0.53f, 1.00f);
+    c[ImGuiCol_SliderGrab]      = ImVec4(0.55f, 0.55f, 0.85f, 0.80f);
+
+    t.bubble_self      = IM_COL32( 64,  64, 168, 225);
+    t.bubble_other     = IM_COL32( 40,  40, 120, 220);
+    t.bubble_rounding  = 0.0f;
+    t.header_bg        = IM_COL32( 14,   9,  44, 250);
+    t.active_bg        = IM_COL32( 50,  50, 140, 190);
+    t.input_bg         = IM_COL32( 10,   7,  34, 230);
+    t.input_border     = IM_COL32(100, 100, 200, 100);
+    t.avatar_bg        = IM_COL32( 80,  80, 190, 255);
+    t.unread_dot       = IM_COL32(255, 220,  80, 255);
+    t.pin_accent       = IM_COL32(201, 212, 135, 255);
+    t.sender_self      = ImVec4(0.63f, 0.63f, 1.00f, 1.0f);
+    t.sender_other     = ImVec4(0.55f, 0.85f, 0.95f, 1.0f);
+    t.timestamp        = ImVec4(0.40f, 0.38f, 0.72f, 1.0f);
+    t.unread_label     = ImVec4(1.00f, 0.90f, 0.40f, 1.0f);
+    t.status_ok        = ImVec4(0.40f, 1.00f, 0.55f, 1.0f);
+    t.status_warn      = ImVec4(1.00f, 0.90f, 0.30f, 1.0f);
+    t.status_err       = ImVec4(1.00f, 0.35f, 0.35f, 1.0f);
+    t.bob_amplitude    = 3.0f;
+    t.bob_period_ms    = 2200.0f;
+    t.flash_period_ms  = 800.0f;
+    t.fade_ms          = 120.0f;
+    t.draw_chat_bg     = C64DrawChatBg;
+    t.draw_contacts_bg = C64DrawContactsBg;
+    return t;
+}
+
+// ── Underwater theme builder ─────────────────────────────────────────────────
+
+static TyrianTheme BuildUnderwaterTheme() {
+    TyrianTheme t;
+    t.name        = "Underwater";
+    t.description = "Deep ocean navy, rising bubbles, bioluminescent caustic shimmer";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]        = ImVec4(0.02f, 0.07f, 0.16f, 0.98f);
+    c[ImGuiCol_ChildBg]         = ImVec4(0.03f, 0.09f, 0.20f, 0.78f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.02f, 0.08f, 0.18f, 0.96f);
+    c[ImGuiCol_Border]          = ImVec4(0.10f, 0.35f, 0.50f, 0.50f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.04f, 0.12f, 0.26f, 0.85f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.06f, 0.18f, 0.36f, 0.85f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.08f, 0.22f, 0.45f, 0.85f);
+    c[ImGuiCol_TitleBg]         = ImVec4(0.02f, 0.07f, 0.16f, 1.00f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.04f, 0.12f, 0.28f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.02f, 0.06f, 0.14f, 0.85f);
+    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.10f, 0.45f, 0.60f, 0.80f);
+    c[ImGuiCol_Button]          = ImVec4(0.06f, 0.22f, 0.40f, 0.85f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.08f, 0.32f, 0.55f, 0.90f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(0.10f, 0.42f, 0.68f, 1.00f);
+    c[ImGuiCol_Header]          = ImVec4(0.06f, 0.28f, 0.45f, 0.80f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.08f, 0.36f, 0.55f, 0.85f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.10f, 0.44f, 0.68f, 1.00f);
+    c[ImGuiCol_Separator]       = ImVec4(0.10f, 0.35f, 0.50f, 0.50f);
+    c[ImGuiCol_Text]            = ImVec4(0.78f, 0.95f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.35f, 0.55f, 0.65f, 1.00f);
+    c[ImGuiCol_CheckMark]       = ImVec4(0.00f, 0.85f, 0.90f, 1.00f);
+    c[ImGuiCol_SliderGrab]      = ImVec4(0.10f, 0.60f, 0.80f, 0.80f);
+
+    t.bubble_self      = IM_COL32( 15,  60, 100, 200);
+    t.bubble_other     = IM_COL32( 10,  40,  70, 200);
+    t.bubble_rounding  = 12.0f;
+    t.header_bg        = IM_COL32(  4,  14,  36, 250);
+    t.active_bg        = IM_COL32( 10,  50,  90, 180);
+    t.input_bg         = IM_COL32(  4,  12,  28, 230);
+    t.input_border     = IM_COL32(  0, 150, 180,  90);
+    t.avatar_bg        = IM_COL32(  0, 140, 180, 255);
+    t.unread_dot       = IM_COL32(  0, 220, 200, 255);
+    t.pin_accent       = IM_COL32(  0, 210, 220, 255);
+    t.chat_bg_top      = IM_COL32( 30, 120, 180,  18);
+    t.chat_bg_bot      = IM_COL32(  0,   0,   0,   0);
+    t.sender_self      = ImVec4(0.45f, 0.90f, 1.00f, 1.0f);
+    t.sender_other     = ImVec4(0.70f, 0.95f, 1.00f, 1.0f);
+    t.timestamp        = ImVec4(0.30f, 0.55f, 0.70f, 1.0f);
+    t.unread_label     = ImVec4(0.00f, 0.95f, 0.90f, 1.0f);
+    t.status_ok        = ImVec4(0.20f, 0.95f, 0.70f, 1.0f);
+    t.status_warn      = ImVec4(1.00f, 0.80f, 0.20f, 1.0f);
+    t.status_err       = ImVec4(1.00f, 0.35f, 0.35f, 1.0f);
+    t.bob_amplitude    = 4.0f;
+    t.bob_period_ms    = 3000.0f;
+    t.flash_period_ms  = 1100.0f;
+    t.fade_ms          = 200.0f;
+    t.draw_chat_bg     = UnderwaterDrawChatBg;
+    t.draw_contacts_bg = UnderwaterDrawContactsBg;
+    return t;
+}
+
+// ── Candlelight theme builder ────────────────────────────────────────────────
+
+static TyrianTheme BuildCandlelightTheme() {
+    TyrianTheme t;
+    t.name        = "Candlelight";
+    t.description = "Warm amber firelight, rising embers, irregular candle flicker";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]        = ImVec4(0.05f, 0.03f, 0.02f, 0.98f);
+    c[ImGuiCol_ChildBg]         = ImVec4(0.07f, 0.05f, 0.02f, 0.78f);
+    c[ImGuiCol_PopupBg]         = ImVec4(0.06f, 0.04f, 0.02f, 0.96f);
+    c[ImGuiCol_Border]          = ImVec4(0.45f, 0.28f, 0.08f, 0.50f);
+    c[ImGuiCol_FrameBg]         = ImVec4(0.10f, 0.06f, 0.02f, 0.85f);
+    c[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.10f, 0.03f, 0.85f);
+    c[ImGuiCol_FrameBgActive]   = ImVec4(0.26f, 0.15f, 0.04f, 0.85f);
+    c[ImGuiCol_TitleBg]         = ImVec4(0.05f, 0.03f, 0.01f, 1.00f);
+    c[ImGuiCol_TitleBgActive]   = ImVec4(0.10f, 0.06f, 0.02f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]     = ImVec4(0.04f, 0.02f, 0.01f, 0.85f);
+    c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.50f, 0.30f, 0.08f, 0.80f);
+    c[ImGuiCol_Button]          = ImVec4(0.22f, 0.12f, 0.03f, 0.85f);
+    c[ImGuiCol_ButtonHovered]   = ImVec4(0.35f, 0.20f, 0.05f, 0.90f);
+    c[ImGuiCol_ButtonActive]    = ImVec4(0.48f, 0.28f, 0.06f, 1.00f);
+    c[ImGuiCol_Header]          = ImVec4(0.28f, 0.16f, 0.04f, 0.80f);
+    c[ImGuiCol_HeaderHovered]   = ImVec4(0.38f, 0.22f, 0.05f, 0.85f);
+    c[ImGuiCol_HeaderActive]    = ImVec4(0.50f, 0.30f, 0.07f, 1.00f);
+    c[ImGuiCol_Separator]       = ImVec4(0.40f, 0.24f, 0.06f, 0.50f);
+    c[ImGuiCol_Text]            = ImVec4(1.00f, 0.88f, 0.65f, 1.00f);
+    c[ImGuiCol_TextDisabled]    = ImVec4(0.55f, 0.40f, 0.20f, 1.00f);
+    c[ImGuiCol_CheckMark]       = ImVec4(1.00f, 0.70f, 0.20f, 1.00f);
+    c[ImGuiCol_SliderGrab]      = ImVec4(0.80f, 0.50f, 0.12f, 0.80f);
+
+    t.bubble_self         = IM_COL32( 80,  45,  15, 220);
+    t.bubble_other        = IM_COL32( 52,  30,  10, 215);
+    t.bubble_self_top     = IM_COL32( 95,  55,  18, 220);
+    t.bubble_self_bot     = IM_COL32( 60,  32,  10, 228);
+    t.bubble_other_top    = IM_COL32( 62,  38,  12, 215);
+    t.bubble_other_bot    = IM_COL32( 38,  22,   7, 225);
+    t.bubble_rounding     = 8.0f;
+    t.header_bg           = IM_COL32(  8,   5,   2, 250);
+    t.active_bg           = IM_COL32( 60,  32,   8, 185);
+    t.input_bg            = IM_COL32(  8,   4,   1, 235);
+    t.input_border        = IM_COL32(160,  80,  20,  90);
+    t.avatar_bg           = IM_COL32(180,  90,  20, 255);
+    t.unread_dot          = IM_COL32(255, 120,  20, 255);
+    t.pin_accent          = IM_COL32(255, 160,  40, 255);
+    t.chat_bg_bot         = IM_COL32( 60,  30,   5,  40);
+    t.sender_self         = ImVec4(1.00f, 0.80f, 0.50f, 1.0f);
+    t.sender_other        = ImVec4(0.95f, 0.72f, 0.42f, 1.0f);
+    t.timestamp           = ImVec4(0.50f, 0.38f, 0.22f, 1.0f);
+    t.unread_label        = ImVec4(1.00f, 0.65f, 0.20f, 1.0f);
+    t.status_ok           = ImVec4(0.40f, 0.90f, 0.35f, 1.0f);
+    t.status_warn         = ImVec4(1.00f, 0.75f, 0.10f, 1.0f);
+    t.status_err          = ImVec4(1.00f, 0.30f, 0.25f, 1.0f);
+    t.bob_amplitude       = 3.0f;
+    t.bob_period_ms       = 1600.0f;
+    t.flash_period_ms     = 700.0f;
+    t.fade_ms             = 180.0f;
+    t.draw_chat_bg        = CandlelightDrawChatBg;
+    t.draw_contacts_bg    = CandlelightDrawContactsBg;
+    return t;
+}
+
+// ── Barbie draw hooks ────────────────────────────────────────────────────────
+
+static void BarbieDrawHeart(ImDrawList* dl, float cx, float cy, float r, ImU32 col) {
+    float hw = r * 0.52f;
+    dl->AddCircleFilled(ImVec2(cx - hw, cy - r * 0.18f), r * 0.68f, col, 12);
+    dl->AddCircleFilled(ImVec2(cx + hw, cy - r * 0.18f), r * 0.68f, col, 12);
+    ImVec2 pts[3] = {
+        ImVec2(cx - r * 1.05f, cy + r * 0.08f),
+        ImVec2(cx + r * 1.05f, cy + r * 0.08f),
+        ImVec2(cx,             cy + r * 1.15f),
+    };
+    dl->AddTriangleFilled(pts[0], pts[1], pts[2], col);
+}
+
+static void BarbieHearts(ImDrawList* dl, ImVec2 mn, ImVec2 mx, int count) {
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    float t = (float)ImGui::GetTime();
+    for (int i = 0; i < count; i++) {
+        float phi = fmodf(i * 0.6180339f, 1.0f);
+        float psi = fmodf(i * 0.7548777f, 1.0f);
+
+        // Quadratic skew: most hearts are small, a few are large (4–14px radius)
+        float r = 4.0f + phi * phi * 10.0f;
+
+        // Home position distributed evenly across the panel
+        float hx = mn.x + phi * w;
+        float hy = mn.y + psi * h;
+
+        // Wander amplitude scales with heart size
+        float ax = 22.0f + phi * 28.0f;
+        float ay = 18.0f + psi * 24.0f;
+
+        // Unique Lissajous frequencies — non-repeating wandering paths
+        float fx = 0.12f + phi * 0.18f;
+        float fy = 0.09f + psi * 0.15f;
+
+        float px = hx + ax * sinf(t * fx + phi * 6.28f);
+        float py = hy + ay * sinf(t * fy + psi * 6.28f + 1.1f);
+
+        // Occasional jiggle for every 5th heart when slow pulse peaks
+        if (i % 5 == 0) {
+            float jiggPulse = 0.5f + 0.5f * sinf(t * 0.35f + phi * 4.2f);
+            if (jiggPulse > 0.82f) {
+                px += sinf(t * 14.0f + phi * 7.0f) * 3.5f;
+                py += sinf(t * 11.0f + phi * 5.3f) * 2.5f;
+            }
+        }
+
+        // Clip to panel
+        px = fmaxf(mn.x + r, fminf(mx.x - r, px));
+        py = fmaxf(mn.y + r, fminf(mx.y - r, py));
+
+        float pulse = 0.45f + 0.55f * sinf(t * 0.8f + phi * 5.0f);
+        int   a     = (int)(12 + pulse * 28);
+        int   pick  = i % 3;
+        ImU32 col   = (pick == 0) ? IM_COL32(255,  20, 120, a)
+                    : (pick == 1) ? IM_COL32(220,   0,  90, a)
+                                  : IM_COL32(255,  80, 160, a);
+        BarbieDrawHeart(dl, px, py, r, col);
+    }
+}
+
+static void BarbieDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float h = mx.y - mn.y;
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - h * 0.30f), mx,
+        IM_COL32(0, 0, 0, 0),       IM_COL32(0, 0, 0, 0),
+        IM_COL32(180, 0, 80, 30),   IM_COL32(180, 0, 80, 30));
+    BarbieHearts(dl, mn, mx, 22);
+}
+
+static void BarbieDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    BarbieHearts(dl, mn, mx, 8);
+}
+
+// ── Barbie theme builder ─────────────────────────────────────────────────────
+
+static TyrianTheme BuildBarbieTheme() {
+    TyrianTheme t;
+    t.name        = "Barbie";
+    t.description = "Hot pink and magenta, wandering hearts, glam tiara icon";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.20f, 0.04f, 0.10f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.26f, 0.05f, 0.14f, 0.78f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.22f, 0.04f, 0.12f, 0.97f);
+    c[ImGuiCol_Border]               = ImVec4(0.80f, 0.10f, 0.45f, 0.55f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.32f, 0.06f, 0.18f, 0.85f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.44f, 0.08f, 0.26f, 0.85f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.56f, 0.10f, 0.34f, 0.90f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.20f, 0.04f, 0.10f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.30f, 0.06f, 0.18f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.16f, 0.03f, 0.08f, 0.85f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.80f, 0.10f, 0.48f, 0.80f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1.00f, 0.15f, 0.60f, 0.90f);
+    c[ImGuiCol_Button]               = ImVec4(0.55f, 0.08f, 0.30f, 0.85f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.70f, 0.10f, 0.40f, 0.90f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.88f, 0.12f, 0.52f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.55f, 0.08f, 0.30f, 0.80f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.68f, 0.10f, 0.40f, 0.85f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.85f, 0.12f, 0.52f, 1.00f);
+    c[ImGuiCol_Separator]            = ImVec4(0.70f, 0.10f, 0.40f, 0.50f);
+    c[ImGuiCol_Text]                 = ImVec4(1.00f, 0.92f, 0.96f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.70f, 0.50f, 0.60f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(1.00f, 0.40f, 0.75f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.90f, 0.15f, 0.55f, 0.85f);
+
+    t.bubble_self      = IM_COL32(210,  20, 100, 215);
+    t.bubble_other     = IM_COL32(255, 170, 210, 200);
+    t.bubble_rounding  = 12.0f;
+    t.header_bg        = IM_COL32(140,   8,  55, 255);
+    t.active_bg        = IM_COL32(180,  15,  80, 185);
+    t.input_bg         = IM_COL32(100,   6,  38, 230);
+    t.input_border     = IM_COL32(255,  80, 160, 100);
+    t.avatar_bg        = IM_COL32(200,  10,  90, 255);
+    t.unread_dot       = IM_COL32(255, 255,  80, 255);
+    t.pin_accent       = IM_COL32(255,   0, 150, 255);
+    t.sender_self      = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+    t.sender_other     = ImVec4(0.85f, 0.08f, 0.45f, 1.0f);
+    t.timestamp        = ImVec4(0.88f, 0.55f, 0.75f, 1.0f);
+    t.unread_label     = ImVec4(1.00f, 0.95f, 0.40f, 1.0f);
+    t.status_ok        = ImVec4(0.40f, 1.00f, 0.55f, 1.0f);
+    t.status_warn      = ImVec4(1.00f, 0.85f, 0.20f, 1.0f);
+    t.status_err       = ImVec4(1.00f, 0.30f, 0.30f, 1.0f);
+    t.bob_amplitude    = 4.0f;
+    t.bob_period_ms    = 1800.0f;
+    t.flash_period_ms  = 800.0f;
+    t.fade_ms          = 160.0f;
+    t.draw_chat_bg     = BarbieDrawChatBg;
+    t.draw_contacts_bg = BarbieDrawContactsBg;
+    return t;
+}
+
 using ThemeBuilder = TyrianTheme(*)();
 static const ThemeBuilder kBuiltinThemes[] = {
     BuildNexusTheme,
@@ -2955,6 +3473,10 @@ static const ThemeBuilder kBuiltinThemes[] = {
     BuildDivinityReachTheme,
     BuildHoelbrakTheme,
     BuildNyanCatTheme,
+    BuildC64Theme,
+    BuildUnderwaterTheme,
+    BuildCandlelightTheme,
+    BuildBarbieTheme,
 };
 
 static void ScanThemes() {
@@ -3000,10 +3522,19 @@ static void RenderFloatingIcon() {
         flash_alpha = 0.5f + 0.5f * sinf(t * 2.0f * 3.14159f);
     }
 
-    float bobOffset = 0.0f;
+    float bobOffsetX = 0.0f;
+    float bobOffsetY = 0.0f;
     if (is_flashing) {
-        float bobT = (float)(now_ms % (uint64_t)g_ActiveTheme.bob_period_ms) / g_ActiveTheme.bob_period_ms;
-        bobOffset = sinf(bobT * 2.0f * 3.14159f) * g_ActiveTheme.bob_amplitude;
+        if (g_ActiveTheme.name == "Nyan Cat") {
+            // Jiggle: two fast out-of-phase sine waves on X and Y
+            float jTx = (float)(now_ms % 113u) / 113.0f;
+            float jTy = (float)(now_ms % 79u)  / 79.0f;
+            bobOffsetX = sinf(jTx * 2.0f * 3.14159f) * 2.0f;
+            bobOffsetY = sinf(jTy * 2.0f * 3.14159f + 0.7f) * 1.25f;
+        } else {
+            float bobT = (float)(now_ms % (uint64_t)g_ActiveTheme.bob_period_ms) / g_ActiveTheme.bob_period_ms;
+            bobOffsetY = sinf(bobT * 2.0f * 3.14159f) * g_ActiveTheme.bob_amplitude;
+        }
     }
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
@@ -3016,7 +3547,7 @@ static void RenderFloatingIcon() {
 
     // Apply bob every frame so the animation is visible.
     // ImGuiCond_Always is used, so ImGui's built-in drag is disabled — we handle it manually below.
-    ImGui::SetNextWindowPos(ImVec2(g_FloatingIconX, g_FloatingIconY + bobOffset), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(g_FloatingIconX + bobOffsetX, g_FloatingIconY + bobOffsetY), ImGuiCond_Always);
 
     // Fully transparent window — bubble is drawn directly, no window background
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -3091,6 +3622,27 @@ static void RenderFloatingIcon() {
         std::string full = ThemesDir() + "/" + g_ActiveTheme.icon_texture_path;
         g_ActiveTheme.icon_texture = APIDefs->Textures_GetOrCreateFromFile(id.c_str(), full.c_str());
     }
+    // Nyan Cat built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Nyan Cat" && s_NyanFloatIcon)
+        g_ActiveTheme.icon_texture = s_NyanFloatIcon;
+    // Charr Steel built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Charr Steel" && s_CharrFloatIcon)
+        g_ActiveTheme.icon_texture = s_CharrFloatIcon;
+    // Asuran Lab built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Asuran Lab" && s_GolemFloatIcon)
+        g_ActiveTheme.icon_texture = s_GolemFloatIcon;
+    // Commodore 64 built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Commodore 64" && s_C64FloatIcon)
+        g_ActiveTheme.icon_texture = s_C64FloatIcon;
+    // Underwater built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Underwater" && s_JellyfishFloatIcon)
+        g_ActiveTheme.icon_texture = s_JellyfishFloatIcon;
+    // Candlelight built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Candlelight" && s_CandleFloatIcon)
+        g_ActiveTheme.icon_texture = s_CandleFloatIcon;
+    // Barbie built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Barbie" && s_TiaraFloatIcon)
+        g_ActiveTheme.icon_texture = s_TiaraFloatIcon;
     // Resolve default floating icon
     if (!g_FloatIconTexture && APIDefs)
         g_FloatIconTexture = APIDefs->Textures_Get(TEX_FLOAT_ICON);
@@ -3106,12 +3658,35 @@ static void RenderFloatingIcon() {
     // Compute tint: white when idle, blends toward accent colour when flashing.
     // AddImage multiplies each pixel by the tint, so transparent PNG areas stay
     // transparent — the flash naturally follows the icon's exact shape.
-    ImVec4 accent = ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.pin_accent);
-    ImVec4 tint(
-        1.0f - flash_alpha * 0.6f * (1.0f - accent.x),
-        1.0f - flash_alpha * 0.6f * (1.0f - accent.y),
-        1.0f - flash_alpha * 0.6f * (1.0f - accent.z),
-        1.0f);
+    ImVec4 tint;
+    if (g_ActiveTheme.name == "Nyan Cat") {
+        // Flash hot pink (255, 105, 180)
+        tint = ImVec4(1.0f, 1.0f - flash_alpha * 0.59f, 1.0f - flash_alpha * 0.29f, 1.0f);
+    } else if (g_ActiveTheme.name == "Charr Steel") {
+        // Flash blood red (180, 0, 0) — G and B drop to zero, R drops slightly
+        tint = ImVec4(1.0f - flash_alpha * 0.29f, 1.0f - flash_alpha, 1.0f - flash_alpha, 1.0f);
+    } else if (g_ActiveTheme.name == "Asuran Lab") {
+        // Flash electric blue (0, 120, 255) — R drops to zero, G drops partially, B stays full
+        tint = ImVec4(1.0f - flash_alpha, 1.0f - flash_alpha * 0.53f, 1.0f, 1.0f);
+    } else if (g_ActiveTheme.name == "Commodore 64") {
+        // Flash C64 light blue — R and G drop, B stays full
+        tint = ImVec4(1.0f - flash_alpha * 0.75f, 1.0f - flash_alpha * 0.75f, 1.0f, 1.0f);
+    } else if (g_ActiveTheme.name == "Underwater") {
+        // Flash bioluminescent cyan — R drops sharply, B stays full
+        tint = ImVec4(1.0f - flash_alpha * 0.85f, 1.0f - flash_alpha * 0.10f, 1.0f, 1.0f);
+    } else if (g_ActiveTheme.name == "Candlelight") {
+        // Flash warm amber/orange — B drops sharply, G drops partially
+        tint = ImVec4(1.0f, 1.0f - flash_alpha * 0.45f, 1.0f - flash_alpha * 0.85f, 1.0f);
+    } else if (g_ActiveTheme.name == "Barbie") {
+        // Flash hot magenta — G drops to zero, B drops partially
+        tint = ImVec4(1.0f, 1.0f - flash_alpha, 1.0f - flash_alpha * 0.45f, 1.0f);
+        ImVec4 accent = ImGui::ColorConvertU32ToFloat4(g_ActiveTheme.pin_accent);
+        tint = ImVec4(
+            1.0f - flash_alpha * 0.6f * (1.0f - accent.x),
+            1.0f - flash_alpha * 0.6f * (1.0f - accent.y),
+            1.0f - flash_alpha * 0.6f * (1.0f - accent.z),
+            1.0f);
+    }
 
     if (activeIcon && activeIcon->Resource) {
         dl->AddImage((ImTextureID)activeIcon->Resource,
@@ -3730,7 +4305,7 @@ static void RenderMessageArea() {
                 }
             }
 
-            // Whole-bubble invisible button (copy text on click; lower priority than link buttons)
+            // Whole-bubble invisible button — copies full message text on click
             ImGui::SetCursorScreenPos(ImVec2(bubbleX, cursor.y));
             snprintf(bubbleIdBuf, sizeof(bubbleIdBuf), "##b_%zu", mi);
             if (ImGui::InvisibleButton(bubbleIdBuf, ImVec2(layout.bubbleW, layout.bubbleH))) {
@@ -3739,13 +4314,10 @@ static void RenderMessageArea() {
                 g_ClipboardMsgExpiry = ImGui::GetTime() + 2.0;
             }
             bool bubbleHovered = ImGui::IsItemHovered();
-            if (bubbleHovered) {
-                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-                if (msg.failed)
-                    ImGui::SetTooltip("Message not delivered — player is offline");
-            }
+            ImGui::SetItemAllowOverlap(); // let link buttons steal hover/active from the bubble
 
-            // Per-link buttons rendered on top of the bubble button — they win hover/click in their area
+            // Per-link buttons — SetItemAllowOverlap above lets them win hover/click over the bubble
+            bool anyLinkHovered = false;
             if (msg.has_links) {
                 for (int si = 0; si < (int)msg.segments.size() && si < (int)layout.seg_layouts.size(); si++) {
                     const auto& seg = msg.segments[si];
@@ -3759,6 +4331,7 @@ static void RenderMessageArea() {
                     bool lHovered = ImGui::IsItemHovered();
                     bool lClicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
                     if (lHovered) {
+                        anyLinkHovered = true;
                         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                         ImGui::BeginTooltip();
 
@@ -3842,6 +4415,12 @@ static void RenderMessageArea() {
                         }
                     }
                 }
+            }
+
+            if (bubbleHovered && !anyLinkHovered) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                if (msg.failed)
+                    ImGui::SetTooltip("Message not delivered — player is offline");
             }
 
             // Advance cursor
@@ -4074,6 +4653,17 @@ void AddonRender() {
 // Options panel (shown in Nexus addon settings)
 void AddonOptions() {
     ThemeGuard themeGuard;
+    // Light-bg themes (e.g. Newspaper) conflict with the host window's dark background —
+    // paint our WindowBg over it before rendering any content.
+    {
+        ImVec4 wbg = g_ActiveTheme.imgui_style.Colors[ImGuiCol_WindowBg];
+        if (wbg.x > 0.5f) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+            dl->AddRectFilled(wp, ImVec2(wp.x + ws.x, wp.y + ws.y),
+                              ImGui::ColorConvertFloat4ToU32(wbg));
+        }
+    }
     ImGui::Text("Tyrian Instant Messaging");
     if (ImGui::SmallButton("Homepage")) {
         ShellExecuteA(NULL, "open", "https://pie.rocks.cc/", NULL, NULL, SW_SHOWNORMAL);
@@ -4378,6 +4968,13 @@ void AddonLoad(AddonAPI_t* aApi) {
         snprintf(id, sizeof(id), "TEX_TYRIAN_NYAN_%02d", i);
         APIDefs->Textures_LoadFromMemory(id, (void*)kNyanFrameData[i], kNyanFrameSize[i], NyanFrameCallback);
     }
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_NYAN_FLOATICON",   (void*)kFloatingCatData,   kFloatingCatDataLen,   NyanIconCallback);
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_CHARR_FLOATICON",  (void*)kFloatingCharrData, kFloatingCharrDataLen, CharrIconCallback);
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_GOLEM_FLOATICON",      (void*)kFloatingGolemData,     kFloatingGolemDataLen,     GolemIconCallback);
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_C64_FLOATICON",        (void*)kFloatingC64Data,       kFloatingC64DataLen,       C64IconCallback);
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_JELLYFISH_FLOATICON",  (void*)kFloatingJellyfishData, kFloatingJellyfishDataLen, JellyfishIconCallback);
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_CANDLE_FLOATICON",     (void*)kFloatingCandleData,    kFloatingCandleDataLen,    CandleIconCallback);
+    APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_TIARA_FLOATICON",      (void*)kFloatingTiaraData,     kFloatingTiaraDataLen,     TiaraIconCallback);
 
     // Register quick access shortcut
     if (g_ShowQAIcon) {

@@ -75,15 +75,15 @@ const char* ProfessionName(uint8_t b) {
 
 ImU32 ProfessionColour(const char* name) {
     if (!name) return IM_COL32(200, 200, 200, 255);
-    if (strcmp(name, "Guardian")     == 0) return IM_COL32(114, 193, 217, 255);
-    if (strcmp(name, "Warrior")      == 0) return IM_COL32(255, 209, 102, 255);
-    if (strcmp(name, "Engineer")     == 0) return IM_COL32(208, 156,  89, 255);
-    if (strcmp(name, "Ranger")       == 0) return IM_COL32(141, 180,  70, 255);
-    if (strcmp(name, "Thief")        == 0) return IM_COL32(192, 143,  57, 255);
-    if (strcmp(name, "Elementalist") == 0) return IM_COL32(246, 138, 135, 255);
-    if (strcmp(name, "Mesmer")       == 0) return IM_COL32(182, 121, 213, 255);
-    if (strcmp(name, "Necromancer")  == 0) return IM_COL32( 82, 167, 111, 255);
-    if (strcmp(name, "Revenant")     == 0) return IM_COL32(209, 110,  90, 255);
+    if (strcmp(name, "Guardian")     == 0) return IM_COL32( 86, 205, 214, 255); // #56cdd6
+    if (strcmp(name, "Warrior")      == 0) return IM_COL32(235, 197,  59, 255); // #ebc53b
+    if (strcmp(name, "Engineer")     == 0) return IM_COL32(204, 146,  67, 255); // #cc9243
+    if (strcmp(name, "Ranger")       == 0) return IM_COL32(189, 217, 102, 255); // #bdd966
+    if (strcmp(name, "Thief")        == 0) return IM_COL32(181, 116, 116, 255); // #b57474
+    if (strcmp(name, "Elementalist") == 0) return IM_COL32(237,  84,  38, 255); // #ed5426
+    if (strcmp(name, "Mesmer")       == 0) return IM_COL32(194, 116, 232, 255); // #c274e8
+    if (strcmp(name, "Necromancer")  == 0) return IM_COL32( 33, 211, 121, 255); // #21d379
+    if (strcmp(name, "Revenant")     == 0) return IM_COL32(173,  54,  54, 255); // #ad3636
     return IM_COL32(200, 200, 200, 255);
 }
 
