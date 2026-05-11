@@ -4,7 +4,7 @@ A Guild Wars 2 addon for [Raidcore Nexus](https://raidcore.gg/Nexus) that provid
 
 ## AI Notice
 
-This addon has been 100% created in [Claude Code](https://claude.ai/code) using Claude. I understand that some folks have a moral, financial or political objection to creating software using an LLM. I just wanted to make a useful tool for the GW2 community, and this was the only way I could do it.
+This addon has largely been created using Claude. I understand that some folks have a moral, financial or political objection to creating software using an LLM. I just wanted to make a useful tool for the GW2 community, and this was the only way I could do it.
 
 If an LLM creating software upsets you, then perhaps this repo isn't for you. Move on, and enjoy your day.
 
@@ -17,18 +17,14 @@ If an LLM creating software upsets you, then perhaps this repo isn't for you. Mo
 - **Click-to-open links** — click any URL in a chat bubble to open it; other link types copy to clipboard
 - **Sound notifications** — drop a `.wav` or `.mp3` into `addons/TyrianIM/sounds/` to play on incoming whispers
 - **Floating notification icon** — bobs in a corner of the screen and flashes on unread messages
-- **13 built-in themes** with animated backgrounds, each with a matching floating icon:
-  - GW2 Dark, Nexus Passthrough
-  - Charr Steel, Asuran Lab, Sylvari Grove, Divinity's Reach, Hoelbrak
-  - Nyan Cat, Commodore 64
-  - Underwater, Candlelight, Barbie, Fishtank
+- **13 built-in themes** with animated backgrounds, each with a matching floating icon
 - **Custom themes** via TOML files — see [themes.md](themes.md)
 
 ## Screenshots
 
-![Fishtank theme](screenshots/fishtank.png)
-
 ![GW2 Dark theme](screenshots/gw2dark.png)
+
+![Fishtank theme](screenshots/fishtank.png)
 
 ![Sylvari Grove theme](screenshots/sylvari.png)
 
@@ -60,4 +56,4 @@ Output: `build/TyrianIM.dll`
 
 ## License
 
-This software is provided as-is, without a warranty of any kind. Use at your own risk.
+MIT

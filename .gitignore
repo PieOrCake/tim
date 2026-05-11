@@ -7,6 +7,14 @@ src/nyancat_frames.h
 # LLM files
 CLAUDE.md
 handover.md
+plans/
+
+# Floating icon source PNGs (embedded into headers via xxd)
+floating*.png
+
+# Nyan Cat source assets (frames live in assets/nyan/)
+nyancat.png
+nyan-cat.gif
 
 # Visual companion sessions
 .superpowers/
