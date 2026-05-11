@@ -2,6 +2,30 @@
 
 Themes are `.toml` files placed in `addons/TyrianIM/themes/` inside your GW2 folder. They appear in the theme dropdown in the TyrianIM settings panel automatically — no restart required.
 
+## Built-in themes
+
+The following themes ship with TyrianIM and can be selected directly from the dropdown. They serve as good references for color direction when building a custom theme.
+
+| Theme | Style |
+|---|---|
+| GW2 Dark | Default dark palette matching the GW2 UI |
+| Nexus Passthrough | Inherits the host Nexus window style |
+| Charr Steel | Industrial dark red |
+| Asuran Lab | Electric cyan on near-black |
+| Sylvari Grove | Green and gold with animated Bezier vines |
+| Divinity's Reach | Warm stone and parchment |
+| Hoelbrak | Nordic blue with aurora shimmer |
+| Nyan Cat | Animated rainbow and star field |
+| Commodore 64 | Classic C64 blue phosphor |
+| Underwater | Deep ocean teal with rising bubbles |
+| Candlelight | Warm amber with ember particles |
+| Barbie | Hot pink with wandering hearts and sparkles |
+| Fishtank | Deep navy with swimming fish, seaweed and a visiting crab |
+
+> **Note:** Animated backgrounds (particle systems, draw hooks) are exclusive to compiled-in themes and cannot be replicated via TOML. TOML themes support a static PNG background via `bg_texture` (see below).
+
+---
+
 ---
 
 ## Quick start
@@ -191,13 +215,17 @@ Place PNG files in the same `themes/` directory as your `.toml`.
 | Key              | Description                                                   |
 |------------------|---------------------------------------------------------------|
 | `bg_texture`     | PNG drawn behind chat messages (filename only, e.g. `bg.png`)|
-| `icon_texture`   | PNG to replace the floating notification icon (64×64 ideal)  |
+| `icon_texture`   | PNG to replace the floating notification icon (64×64 recommended, transparent background) |
 
 ```toml
 [chat]
 bg_texture   = "krytan_stone.png"
 icon_texture = "my_icon.png"
 ```
+
+`bg_texture` renders as a static image. For animated backgrounds (particle systems, draw hooks), see the built-in themes — these are compiled-in and not available via TOML.
+
+`icon_texture` replaces the floating speech-bubble icon that bobs in the corner and flashes on incoming whispers. 64×64 PNG with a transparent background works best. The flash tint is driven by `pin_accent`.
 
 ---
 
