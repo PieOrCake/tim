@@ -33,6 +33,7 @@
 #include "floatingjellyfish.h"
 #include "floatingcandle.h"
 #include "floatingtiara.h"
+#include "floatingfish.h"
 
 // Version constants
 #define V_MAJOR 0
@@ -552,6 +553,7 @@ static Texture_t* s_C64FloatIcon        = nullptr;
 static Texture_t* s_JellyfishFloatIcon  = nullptr;
 static Texture_t* s_CandleFloatIcon     = nullptr;
 static Texture_t* s_TiaraFloatIcon      = nullptr;
+static Texture_t* s_FishFloatIcon       = nullptr;
 
 static void NyanFrameCallback(const char* aId, Texture_t* aTex) {
     int i = atoi(aId + 16); // skip "TEX_TYRIAN_NYAN_"
@@ -585,6 +587,9 @@ static void CandleIconCallback(const char* /*aId*/, Texture_t* aTex) {
 
 static void TiaraIconCallback(const char* /*aId*/, Texture_t* aTex) {
     s_TiaraFloatIcon = aTex;
+}
+static void FishIconCallback(const char* /*aId*/, Texture_t* aTex) {
+    s_FishFloatIcon = aTex;
 }
 
 // URL toast notification queue
@@ -3574,6 +3579,346 @@ static TyrianTheme BuildBarbieTheme() {
     return t;
 }
 
+// ── Fishtank draw hooks ──────────────────────────────────────────────────────
+
+static void FishtankSeaweed(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t = (float)ImGui::GetTime();
+    float w = mx.x - mn.x;
+    auto hashF = [](int a, int b) -> float {
+        unsigned int hv = (unsigned int)(a * 1973 + b * 9781 + 31);
+        hv ^= (hv >> 16); hv *= 0x45d9f3bu; hv ^= (hv >> 16);
+        return (float)(hv & 0xFFFFu) / 65536.0f;
+    };
+    for (int i = 0; i < 6; i++) {
+        float baseX   = mn.x + (0.05f + hashF(i, 1) * 0.90f) * w;
+        float stalkH  = 40.0f + hashF(i, 2) * 50.0f;
+        float phase   = hashF(i, 3) * 6.28318f;
+        float swayAmt = 8.0f  + hashF(i, 4) * 10.0f;
+        float sway    = sinf(t * 0.6f + phase) * swayAmt;
+        float sway2   = sinf(t * 0.6f + phase + 0.8f) * swayAmt * 0.6f;
+        ImVec2 p0(baseX,          mx.y);
+        ImVec2 p1(baseX + sway2,  mx.y - stalkH * 0.35f);
+        ImVec2 p2(baseX + sway,   mx.y - stalkH * 0.70f);
+        ImVec2 p3(baseX + sway,   mx.y - stalkH);
+        dl->AddBezierCubic(p0, p1, p2, p3, IM_COL32(20, 110, 55, 200), 2.5f);
+        dl->AddBezierCubic(p0, p1, p2, p3, IM_COL32(45, 180, 85,  80), 1.0f);
+        // Small oval leaf at tip
+        float leafCx = p3.x + sinf(t * 0.5f + phase) * 3.0f;
+        float leafCy = p3.y - 4.0f;
+        dl->PathClear();
+        for (int k = 0; k <= 8; k++) {
+            float a = (float)k / 8.0f * 6.28318f;
+            dl->PathLineTo(ImVec2(leafCx + cosf(a) * 4.0f, leafCy + sinf(a) * 7.0f));
+        }
+        dl->PathFillConvex(IM_COL32(30, 160, 70, 150));
+    }
+}
+
+static void FishtankTreasureChest(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t   = (float)ImGui::GetTime();
+    float cx  = mn.x + (mx.x - mn.x) * 0.72f;
+    float cy  = mx.y - 28.0f;
+    const float bodyW = 38.0f, bodyH = 22.0f, lidH = 10.0f;
+
+    // Pulsing glow behind chest
+    float glowA = 0.5f + 0.5f * sinf(t * 1.2f);
+    dl->AddCircleFilled(ImVec2(cx, cy), bodyW * 0.65f,
+                        IM_COL32(200, 160, 30, (int)(20.0f * glowA)), 16);
+
+    // Body
+    ImVec2 bodyTL(cx - bodyW * 0.5f, cy - bodyH * 0.5f);
+    ImVec2 bodyBR(cx + bodyW * 0.5f, cy + bodyH * 0.5f);
+    dl->AddRectFilled(bodyTL, bodyBR, IM_COL32(100, 65, 25, 230));
+    dl->AddRect(bodyTL, bodyBR, IM_COL32(160, 110, 40, 255), 0.0f, 0, 1.2f);
+
+    // Lid
+    ImVec2 lidTL(cx - bodyW * 0.5f - 1.0f, cy - bodyH * 0.5f - lidH);
+    ImVec2 lidBR(cx + bodyW * 0.5f + 1.0f, cy - bodyH * 0.5f);
+    dl->AddRectFilled(lidTL, lidBR, IM_COL32(120, 78, 30, 230));
+    dl->AddRect(lidTL, lidBR, IM_COL32(180, 125, 45, 255), 0.0f, 0, 1.2f);
+
+    // Metal band across body centre + two vertical bands
+    dl->AddLine(ImVec2(cx - bodyW * 0.5f, cy), ImVec2(cx + bodyW * 0.5f, cy),
+                IM_COL32(180, 145, 60, 220), 1.5f);
+    const float vbands[2] = {-10.0f, 10.0f};
+    for (int vi = 0; vi < 2; vi++)
+        dl->AddLine(ImVec2(cx + vbands[vi], cy - bodyH * 0.5f),
+                    ImVec2(cx + vbands[vi], cy + bodyH * 0.5f),
+                    IM_COL32(180, 145, 60, 200), 1.0f);
+
+    // Lid centre band
+    float lidMidY = (lidTL.y + lidBR.y) * 0.5f;
+    dl->AddLine(ImVec2(lidTL.x, lidMidY), ImVec2(lidBR.x, lidMidY),
+                IM_COL32(180, 145, 60, 200), 1.0f);
+
+    // Keyhole
+    float khx = cx, khy = cy - 2.0f;
+    dl->AddCircleFilled(ImVec2(khx, khy), 3.0f, IM_COL32(40, 25, 10, 255), 8);
+    dl->AddRectFilled(ImVec2(khx - 1.5f, khy), ImVec2(khx + 1.5f, khy + 5.0f),
+                      IM_COL32(40, 25, 10, 255));
+    dl->AddCircle(ImVec2(khx, khy), 3.0f, IM_COL32(200, 170, 60, 200), 8, 1.0f);
+}
+
+static void FishtankFish(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t = (float)ImGui::GetTime();
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+    auto hashF = [](int a, int b) -> float {
+        unsigned int hv = (unsigned int)(a * 1973 + b * 9781 + 31);
+        hv ^= (hv >> 16); hv *= 0x45d9f3bu; hv ^= (hv >> 16);
+        return (float)(hv & 0xFFFFu) / 65536.0f;
+    };
+    const ImU32 fishCol[5] = {
+        IM_COL32(255, 120,  40, 210),
+        IM_COL32( 80, 200, 240, 210),
+        IM_COL32(240, 220,  50, 210),
+        IM_COL32(200,  60, 180, 210),
+        IM_COL32( 90, 220, 130, 210),
+    };
+    for (int i = 0; i < 5; i++) {
+        float speed      = 18.0f + hashF(i, 1) * 28.0f;
+        float homeY      = mn.y + (0.06f + fmodf((float)i * 0.6180339f, 1.0f) * 0.78f) * h;
+        float bodyRX     = 6.0f  + hashF(i, 3) * 18.0f;
+        float bodyRY     = 4.0f  + hashF(i, 4) * 10.0f;
+        float vertFreq   = 0.5f  + hashF(i, 6) * 1.0f;
+        float vertAmp    = 6.0f  + hashF(i, 7) * 10.0f;
+        float vertPhase  = hashF(i, 8) * 6.28318f;
+
+        float cycle      = fmodf(t * speed + hashF(i, 5) * 2.0f * w, 2.0f * w);
+        bool  facingRight= cycle < w;
+        float px = facingRight ? (mn.x + cycle) : (mx.x - (cycle - w));
+        px = fmaxf(mn.x + bodyRX + 4.0f, fminf(mx.x - bodyRX - 4.0f, px));
+        float py = homeY + sinf(t * vertFreq + vertPhase) * vertAmp;
+        py = fmaxf(mn.y + bodyRY + 8.0f, fminf(mx.y - 55.0f - bodyRY, py));
+
+        // Body ellipse
+        dl->PathClear();
+        for (int k = 0; k <= 12; k++) {
+            float a = (float)k / 12.0f * 6.28318f;
+            dl->PathLineTo(ImVec2(px + cosf(a) * bodyRX, py + sinf(a) * bodyRY));
+        }
+        dl->PathFillConvex(fishCol[i]);
+
+        // Tail triangle behind the body
+        float tailDir  = facingRight ? -1.0f : 1.0f;
+        ImVec2 ta(px + tailDir * bodyRX,                    py);
+        ImVec2 tb(px + tailDir * (bodyRX + bodyRY * 1.4f),  py - bodyRY * 0.7f);
+        ImVec2 tc(px + tailDir * (bodyRX + bodyRY * 1.4f),  py + bodyRY * 0.7f);
+        dl->AddTriangleFilled(ta, tb, tc, fishCol[i]);
+
+        // Eye
+        float eyeX = px + (facingRight ? 1.0f : -1.0f) * bodyRX * 0.55f;
+        float eyeY = py - bodyRY * 0.3f;
+        dl->AddCircleFilled(ImVec2(eyeX, eyeY), 1.8f, IM_COL32(255, 255, 255, 220), 6);
+        dl->AddCircleFilled(ImVec2(eyeX, eyeY), 0.7f, IM_COL32(  0,   0,   0, 220), 4);
+    }
+}
+
+static void FishtankCrab(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t = (float)ImGui::GetTime();
+    float w = mx.x - mn.x;
+    auto hashF = [](int a, int b) -> float {
+        unsigned int hv = (unsigned int)(a * 1973 + b * 9781 + 31);
+        hv ^= (hv >> 16); hv *= 0x45d9f3bu; hv ^= (hv >> 16);
+        return (float)(hv & 0xFFFFu) / 65536.0f;
+    };
+    const float SCUTTLE_DUR = 3.5f;
+    float epochT = 0.0f;
+    for (int j = 0; j < 512; j++) {
+        float gap      = 30.0f + hashF(j, 17) * 30.0f;
+        float cycleLen = gap + SCUTTLE_DUR;
+        if (t < epochT + cycleLen) {
+            float localT = t - epochT;
+            if (localT >= gap) {
+                float progress = (localT - gap) / SCUTTLE_DUR;
+                bool  ltr      = hashF(j, 7) > 0.5f;
+                float cx = ltr ? (mn.x - 20.0f + progress * (w + 40.0f))
+                               : (mx.x + 20.0f - progress * (w + 40.0f));
+                float cy = mx.y - 12.0f;
+                const float bRX = 14.0f, bRY = 7.0f;
+
+                // Body
+                dl->PathClear();
+                for (int k = 0; k <= 12; k++) {
+                    float a = (float)k / 12.0f * 6.28318f;
+                    dl->PathLineTo(ImVec2(cx + cosf(a) * bRX, cy + sinf(a) * bRY));
+                }
+                dl->PathFillConvex(IM_COL32(200, 60, 20, 230));
+                dl->PathClear();
+                for (int k = 0; k <= 12; k++) {
+                    float a = (float)k / 12.0f * 6.28318f;
+                    dl->PathLineTo(ImVec2(cx + cosf(a) * bRX, cy + sinf(a) * bRY));
+                }
+                dl->PathStroke(IM_COL32(240, 90, 40, 180), true, 1.0f);
+
+                // Legs (3 per side, animated scuttle)
+                for (int k = 0; k < 3; k++) {
+                    float legAnim = sinf(t * 12.0f + k * 0.8f) * 2.0f;
+                    float lsx = cx - bRX * (0.4f + k * 0.25f);
+                    float rsx = cx + bRX * (0.4f + k * 0.25f);
+                    float lsy = cy + bRY * 0.4f;
+                    float rsy = lsy;
+                    dl->AddLine(ImVec2(lsx, lsy),
+                                ImVec2(lsx - 9.0f - k, lsy + 6.0f + legAnim),
+                                IM_COL32(200, 60, 20, 200), 1.2f);
+                    dl->AddLine(ImVec2(rsx, rsy),
+                                ImVec2(rsx + 9.0f + k, rsy + 6.0f + legAnim),
+                                IM_COL32(200, 60, 20, 200), 1.2f);
+                }
+
+                // Claws at the front
+                float frontDir = ltr ? 1.0f : -1.0f;
+                float clawBx = cx + frontDir * bRX, clawBy = cy - bRY * 0.3f;
+                dl->AddLine(ImVec2(clawBx, clawBy),
+                            ImVec2(clawBx + frontDir * 7.0f, clawBy - 5.0f),
+                            IM_COL32(220, 80, 30, 220), 1.5f);
+                dl->AddLine(ImVec2(clawBx, clawBy),
+                            ImVec2(clawBx + frontDir * 7.0f, clawBy + 3.0f),
+                            IM_COL32(220, 80, 30, 220), 1.5f);
+
+                // Eyes on stalks
+                const float eyeOffs[2] = {-4.0f, 4.0f};
+                for (int ei = 0; ei < 2; ei++) {
+                    float ex = cx + eyeOffs[ei], ey = cy - bRY - 4.0f;
+                    dl->AddLine(ImVec2(ex, cy - bRY), ImVec2(ex, ey),
+                                IM_COL32(200, 60, 20, 200), 1.0f);
+                    dl->AddCircleFilled(ImVec2(ex, ey), 2.0f, IM_COL32( 10,  10,  10, 240), 5);
+                    dl->AddCircleFilled(ImVec2(ex, ey), 0.8f, IM_COL32(255, 255, 255, 180), 4);
+                }
+            }
+            break;
+        }
+        epochT += cycleLen;
+    }
+}
+
+static void FishtankDrawChatBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    float t = (float)ImGui::GetTime();
+    float w = mx.x - mn.x, h = mx.y - mn.y;
+
+    // Deep blue gradient overlay
+    dl->AddRectFilledMultiColor(mn, mx,
+        IM_COL32(5, 20, 60, 60), IM_COL32(5, 20, 60, 60),
+        IM_COL32(0,  8, 30, 90), IM_COL32(0,  8, 30, 90));
+
+    // Sandy bottom strip
+    dl->AddRectFilledMultiColor(
+        ImVec2(mn.x, mx.y - 18.0f), mx,
+        IM_COL32(160, 135, 70,   0), IM_COL32(160, 135, 70,   0),
+        IM_COL32(160, 135, 70, 180), IM_COL32(160, 135, 70, 180));
+
+    // Subtle caustic shimmer (two layers)
+    const float shFreq[2]  = {2.4f, 1.7f};
+    const float shSpeed[2] = {0.18f, 0.25f};
+    const ImU32 shCol[2]   = {IM_COL32(100,200,255,8), IM_COL32(200,240,255,6)};
+    float bandH = h * 0.12f;
+    for (int layer = 0; layer < 2; layer++) {
+        float segW = w / 16.0f;
+        for (int s = 0; s < 16; s++) {
+            float x0  = mn.x + s * segW, x1 = x0 + segW;
+            float xn0 = (float)s / 16.0f, xn1 = (float)(s + 1) / 16.0f;
+            float y0  = mn.y + bandH * (0.3f + 0.7f * sinf(shFreq[layer] * xn0 * 6.28318f + t * shSpeed[layer]));
+            float y1  = mn.y + bandH * (0.3f + 0.7f * sinf(shFreq[layer] * xn1 * 6.28318f + t * shSpeed[layer]));
+            dl->AddTriangleFilled(ImVec2(x0, mn.y), ImVec2(x1, mn.y), ImVec2(x0, y0), shCol[layer]);
+            dl->AddTriangleFilled(ImVec2(x1, mn.y), ImVec2(x1,  y1),  ImVec2(x0, y0), shCol[layer]);
+        }
+    }
+
+    // Suspended particle texture — faint dots drifting slowly to suggest depth
+    {
+        auto hashF = [](int a, int b) -> float {
+            unsigned int hv = (unsigned int)(a * 1973 + b * 9781 + 31);
+            hv ^= (hv >> 16); hv *= 0x45d9f3bu; hv ^= (hv >> 16);
+            return (float)(hv & 0xFFFFu) / 65536.0f;
+        };
+        for (int i = 0; i < 70; i++) {
+            float px    = mn.x + hashF(i, 20) * w + sinf(t * 0.15f + hashF(i, 22) * 6.28318f) * 4.0f;
+            float py    = mn.y + hashF(i, 21) * h + sinf(t * 0.10f + hashF(i, 22) * 6.28318f + 1.1f) * 3.0f;
+            float r     = 0.8f + hashF(i, 23) * 1.2f;
+            float pulse = 0.5f + 0.5f * sinf(t * 0.3f + hashF(i, 22) * 12.566f);
+            int   a     = (int)(5 + pulse * 13);
+            dl->AddCircleFilled(ImVec2(px, py), r, IM_COL32(140, 210, 255, a), 4);
+        }
+    }
+
+    FishtankSeaweed(dl, mn, mx);
+    FishtankTreasureChest(dl, mn, mx);
+    FishtankFish(dl, mn, mx);
+    FishtankCrab(dl, mn, mx);
+}
+
+static void FishtankDrawContactsBg(ImDrawList* dl, ImVec2 mn, ImVec2 mx) {
+    UnderwaterBubbles(dl, mn, mx, 35);
+}
+
+// ── Fishtank theme builder ───────────────────────────────────────────────────
+
+static TyrianTheme BuildFishtankTheme() {
+    TyrianTheme t;
+    t.name        = "Fishtank";
+    t.description = "Deep ocean fishtank with swimming fish, seaweed, treasure chest and visiting crab";
+
+    ImGuiStyle& s = t.imgui_style;
+    s = BuildGW2Theme();
+
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_WindowBg]             = ImVec4(0.02f, 0.06f, 0.14f, 0.97f);
+    c[ImGuiCol_ChildBg]              = ImVec4(0.03f, 0.08f, 0.18f, 0.78f);
+    c[ImGuiCol_PopupBg]              = ImVec4(0.02f, 0.07f, 0.16f, 0.96f);
+    c[ImGuiCol_Border]               = ImVec4(0.08f, 0.30f, 0.45f, 0.55f);
+    c[ImGuiCol_FrameBg]              = ImVec4(0.04f, 0.10f, 0.22f, 0.85f);
+    c[ImGuiCol_FrameBgHovered]       = ImVec4(0.06f, 0.15f, 0.32f, 0.85f);
+    c[ImGuiCol_FrameBgActive]        = ImVec4(0.08f, 0.20f, 0.42f, 0.85f);
+    c[ImGuiCol_TitleBg]              = ImVec4(0.02f, 0.06f, 0.14f, 1.00f);
+    c[ImGuiCol_TitleBgActive]        = ImVec4(0.04f, 0.10f, 0.25f, 1.00f);
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.02f, 0.05f, 0.12f, 0.85f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.08f, 0.40f, 0.55f, 0.80f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.12f, 0.55f, 0.70f, 0.90f);
+    c[ImGuiCol_Button]               = ImVec4(0.05f, 0.18f, 0.36f, 0.85f);
+    c[ImGuiCol_ButtonHovered]        = ImVec4(0.08f, 0.26f, 0.50f, 0.90f);
+    c[ImGuiCol_ButtonActive]         = ImVec4(0.10f, 0.38f, 0.65f, 1.00f);
+    c[ImGuiCol_Header]               = ImVec4(0.05f, 0.24f, 0.42f, 0.80f);
+    c[ImGuiCol_HeaderHovered]        = ImVec4(0.08f, 0.32f, 0.52f, 0.85f);
+    c[ImGuiCol_HeaderActive]         = ImVec4(0.10f, 0.40f, 0.65f, 1.00f);
+    c[ImGuiCol_Separator]            = ImVec4(0.08f, 0.30f, 0.45f, 0.50f);
+    c[ImGuiCol_Text]                 = ImVec4(0.82f, 0.96f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]         = ImVec4(0.38f, 0.58f, 0.68f, 1.00f);
+    c[ImGuiCol_CheckMark]            = ImVec4(0.00f, 0.88f, 0.92f, 1.00f);
+    c[ImGuiCol_SliderGrab]           = ImVec4(0.08f, 0.62f, 0.82f, 0.80f);
+
+    t.bubble_self      = IM_COL32( 12,  55,  95, 205);
+    t.bubble_self_top  = IM_COL32( 18,  72, 118, 210);
+    t.bubble_self_bot  = IM_COL32(  6,  34,  60, 218);
+    t.bubble_other     = IM_COL32(  8,  38,  70, 200);
+    t.bubble_other_top = IM_COL32( 12,  50,  90, 205);
+    t.bubble_other_bot = IM_COL32(  4,  22,  45, 215);
+    t.bubble_rounding  = 12.0f;
+
+    t.header_bg    = IM_COL32(  4,  12,  32, 252);
+    t.active_bg    = IM_COL32(  8,  48,  88, 185);
+    t.input_bg     = IM_COL32(  4,  10,  26, 235);
+    t.input_border = IM_COL32(  0, 140, 175,  90);
+    t.avatar_bg    = IM_COL32(  0, 135, 175, 255);
+    t.unread_dot   = IM_COL32(  0, 225, 200, 255);
+    t.pin_accent   = IM_COL32(  0, 210, 225, 255);
+
+    t.sender_self  = ImVec4(0.40f, 0.92f, 1.00f, 1.0f);
+    t.sender_other = ImVec4(0.72f, 0.96f, 1.00f, 1.0f);
+    t.timestamp    = ImVec4(0.28f, 0.52f, 0.68f, 1.0f);
+    t.unread_label = ImVec4(0.00f, 0.98f, 0.88f, 1.0f);
+    t.status_ok    = ImVec4(0.22f, 0.96f, 0.68f, 1.0f);
+    t.status_warn  = ImVec4(1.00f, 0.82f, 0.22f, 1.0f);
+    t.status_err   = ImVec4(1.00f, 0.35f, 0.35f, 1.0f);
+
+    t.bob_amplitude   = 4.5f;
+    t.bob_period_ms   = 2800.0f;
+    t.flash_period_ms = 1000.0f;
+    t.fade_ms         = 190.0f;
+
+    t.draw_chat_bg     = FishtankDrawChatBg;
+    t.draw_contacts_bg = FishtankDrawContactsBg;
+    return t;
+}
+
 using ThemeBuilder = TyrianTheme(*)();
 static const ThemeBuilder kBuiltinThemes[] = {
     BuildNexusTheme,
@@ -3588,6 +3933,7 @@ static const ThemeBuilder kBuiltinThemes[] = {
     BuildUnderwaterTheme,
     BuildCandlelightTheme,
     BuildBarbieTheme,
+    BuildFishtankTheme,
 };
 
 static void ScanThemes() {
@@ -3754,6 +4100,9 @@ static void RenderFloatingIcon() {
     // Barbie built-in floating icon
     if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Barbie" && s_TiaraFloatIcon)
         g_ActiveTheme.icon_texture = s_TiaraFloatIcon;
+    // Fishtank built-in floating icon
+    if (!g_ActiveTheme.icon_texture && g_ActiveTheme.name == "Fishtank" && s_FishFloatIcon)
+        g_ActiveTheme.icon_texture = s_FishFloatIcon;
     // Resolve default floating icon
     if (!g_FloatIconTexture && APIDefs)
         g_FloatIconTexture = APIDefs->Textures_Get(TEX_FLOAT_ICON);
@@ -3788,6 +4137,9 @@ static void RenderFloatingIcon() {
     } else if (g_ActiveTheme.name == "Candlelight") {
         // Flash warm amber/orange — B drops sharply, G drops partially
         tint = ImVec4(1.0f, 1.0f - flash_alpha * 0.45f, 1.0f - flash_alpha * 0.85f, 1.0f);
+    } else if (g_ActiveTheme.name == "Fishtank") {
+        // Flash bright cyan-teal
+        tint = ImVec4(1.0f - flash_alpha * 0.8f, 1.0f, 1.0f, 1.0f);
     } else if (g_ActiveTheme.name == "Barbie") {
         // Flash hot magenta — G drops to zero, B drops partially
         tint = ImVec4(1.0f, 1.0f - flash_alpha, 1.0f - flash_alpha * 0.45f, 1.0f);
@@ -5086,6 +5438,7 @@ void AddonLoad(AddonAPI_t* aApi) {
     APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_JELLYFISH_FLOATICON",  (void*)kFloatingJellyfishData, kFloatingJellyfishDataLen, JellyfishIconCallback);
     APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_CANDLE_FLOATICON",     (void*)kFloatingCandleData,    kFloatingCandleDataLen,    CandleIconCallback);
     APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_TIARA_FLOATICON",      (void*)kFloatingTiaraData,     kFloatingTiaraDataLen,     TiaraIconCallback);
+  APIDefs->Textures_LoadFromMemory("TEX_TYRIAN_FISH_FLOATICON",       (void*)kFloatingFishData,      kFloatingFishDataLen,      FishIconCallback);
 
     // Register quick access shortcut
     if (g_ShowQAIcon) {
